@@ -1,0 +1,45 @@
+# Dataset directory
+dataset/
+data/
+sample/
+saved_models/
+embedding_cache/
+lib/
+test.py
+*.png
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Virtual environment
+venv/
+env/
+.env/
+
+# IDE specific files
+.vscode/
+.idea/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Model checkpoints and results
+# retrieval_results/ # Allowed to demonstrate sample results.
+retrieval_results_small_dataset/
+*.pth
+*.pkl
+
+# System files
+.DS_Store
+Thumbs.db
+*.zip
+retrieval_benchmark/run.log
+
+run.log
