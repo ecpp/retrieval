@@ -1,0 +1,21 @@
+model:
+  name: "dinov2"  # Options: "dinov2", "vit", "resnet50"
+  pretrained: true
+  embedding_dim: 768  # For DINOv2/ViT
+  image_size: 224
+
+data:
+  input_dir: "data/input"
+  output_dir: "data/output"
+  database_dir: "data/database"
+  
+indexing:
+  index_file: "models/faiss_index.bin"
+  metadata_file: "models/index_metadata.pkl"
+  
+training:
+  batch_size: 32
+  num_workers: 4
+  
+evaluation:
+  top_k: [1, 5, 10, 20]
