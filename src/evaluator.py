@@ -115,8 +115,9 @@ class RetrievalEvaluator:
             query_path = query["query_path"]
             results = query["results"]
             
-            # Create figure
-            fig, axes = plt.subplots(1, max_results + 1, figsize=(3 * (max_results + 1), 3))
+            # Create figure with more vertical space for text below images
+            fig, axes = plt.subplots(1, max_results + 1, figsize=(3 * (max_results + 1), 3.5))
+            plt.subplots_adjust(bottom=0.3)  # Add extra space at the bottom
             
             # Display query
             query_img = Image.open(query_path).convert('RGB')
@@ -131,8 +132,27 @@ class RetrievalEvaluator:
                     
                 if path and os.path.exists(path):
                     result_img = Image.open(path).convert('RGB')
+                    # Convert distance to similarity score (0-100%), where higher is better
+                    similarity = 100 * (1 / (1 + distance))
                     axes[j+1].imshow(result_img)
-                    axes[j+1].set_title(f"Dist: {distance:.2f}")
+                    
+                    # Set similarity as title
+                    axes[j+1].set_title(f"Similarity: {similarity:.1f}%")
+                    
+                    # Get part info if available
+                    if 'part_info' in results and j < len(results['part_info']) and results['part_info'][j]:
+                        info = results['part_info'][j]
+                        parent_step = info.get('parent_step', 'unknown')
+                        part_name = info.get('part_name', 'unknown')
+                        
+                        # Add part info at the bottom of the figure, below the image
+                        axes[j+1].text(0.5, -0.15, f"STEP: {parent_step}", 
+                                     horizontalalignment='center', verticalalignment='top', 
+                                     transform=axes[j+1].transAxes, fontsize=8, color='black')
+                        axes[j+1].text(0.5, -0.25, f"Part: {part_name}", 
+                                     horizontalalignment='center', verticalalignment='top', 
+                                     transform=axes[j+1].transAxes, fontsize=8, color='black')
+                    
                     axes[j+1].axis('off')
                 else:
                     axes[j+1].text(0.5, 0.5, "Image not found", horizontalalignment='center')

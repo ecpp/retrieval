@@ -8,6 +8,7 @@ from .image_encoder import ImageEncoder
 from .vector_database import VectorDatabase
 from .data_processor import DataProcessor
 from .evaluator import RetrievalEvaluator
+from .rotational_utils import rotation_invariant_search
 
 class RetrievalSystem:
     """
@@ -56,6 +57,46 @@ class RetrievalSystem:
         
         print(f"Retrieval system initialized with {self.config['model']['name']} encoder")
     
+    def extract_part_info(self, image_path):
+        """
+        Extract part information from an image path
+        
+        Args:
+            image_path (str): Path to the image
+            
+        Returns:
+            info (dict): Dictionary with part information
+        """
+        try:
+            # Get the filename without extension
+            filename = os.path.basename(image_path)
+            name_without_ext = os.path.splitext(filename)[0]
+            
+            # Try to extract parent STEP and part name
+            # Assuming format is something like "step_id_part_name.png"
+            parts = name_without_ext.split('_')
+            
+            if len(parts) > 1:
+                # First part is the STEP ID
+                parent_step = parts[0]
+                # Rest is the part name
+                part_name = '_'.join(parts[1:])
+            else:
+                # If we can't split, use the whole filename as part name
+                parent_step = "unknown"
+                part_name = name_without_ext
+            
+            return {
+                "parent_step": parent_step,
+                "part_name": part_name
+            }
+        except Exception as e:
+            print(f"Error extracting part info from {image_path}: {e}")
+            return {
+                "parent_step": "unknown",
+                "part_name": os.path.basename(image_path)
+            }
+    
     def ingest_data(self, dataset_dir):
         """
         Ingest data from a directory of processed STEP files
@@ -91,11 +132,12 @@ class RetrievalSystem:
         if image_dir is None:
             image_dir = os.path.join(self.config["data"]["output_dir"], "images")
         
-        # Build the index
+        # Build the index with metadata extraction
         count = self.vector_db.build_from_directory(
             self.image_encoder,
             image_dir,
-            batch_size=self.config["training"]["batch_size"]
+            batch_size=self.config["training"]["batch_size"],
+            metadata_func=self.extract_part_info  # Pass the metadata extraction function
         )
         
         # Save the index
@@ -103,25 +145,40 @@ class RetrievalSystem:
         
         return count
     
-    def retrieve_similar(self, query_image_path, k=10):
+    def retrieve_similar(self, query_image_path, k=10, rotation_invariant=True, num_rotations=8):
         """
         Retrieve similar parts to a query image
         
         Args:
             query_image_path (str): Path to the query image
             k (int): Number of results to retrieve
+            rotation_invariant (bool): Whether to perform rotation-invariant search
+            num_rotations (int): Number of rotations to try if rotation_invariant is True
             
         Returns:
             results (dict): Search results
         """
-        # Encode the query image
-        query_embedding = self.image_encoder.encode_image(query_image_path)
+        if not os.path.exists(query_image_path):
+            return {"error": f"Query image not found: {query_image_path}"}
         
-        if query_embedding is None:
-            return {"error": f"Failed to encode query image: {query_image_path}"}
-        
-        # Search the database
-        results = self.vector_db.search(query_embedding, k=k)
+        if rotation_invariant:
+            # Use rotation-invariant search
+            results = rotation_invariant_search(
+                self.image_encoder, 
+                self.vector_db, 
+                query_image_path, 
+                k=k,
+                num_rotations=num_rotations
+            )
+        else:
+            # Use standard search
+            query_embedding = self.image_encoder.encode_image(query_image_path)
+            
+            if query_embedding is None:
+                return {"error": f"Failed to encode query image: {query_image_path}"}
+            
+            # Search the database
+            results = self.vector_db.search(query_embedding, k=k)
         
         return results
     
@@ -145,9 +202,10 @@ class RetrievalSystem:
                 f"query_results_{os.path.basename(query_image_path)}.png"
             )
         
-        # Create figure
+        # Create figure with more vertical space for text below images
         k = len(results["paths"])
-        fig, axes = plt.subplots(1, k + 1, figsize=(3 * (k + 1), 3))
+        fig, axes = plt.subplots(1, k + 1, figsize=(3 * (k + 1), 3.5))
+        plt.subplots_adjust(bottom=0.3)  # Add extra space at the bottom
         
         # Display query
         query_img = Image.open(query_image_path).convert('RGB')
@@ -156,11 +214,29 @@ class RetrievalSystem:
         axes[0].axis('off')
         
         # Display results
-        for i, (path, distance) in enumerate(zip(results["paths"], results["distances"])):
+        for i, (path, distance, info) in enumerate(zip(results["paths"], results["distances"], results.get("part_info", [None] * len(results["paths"])))):
             if path and os.path.exists(path):
                 result_img = Image.open(path).convert('RGB')
+                # Convert distance to similarity score (0-100%), where higher is better
+                similarity = 100 * (1 / (1 + distance))
                 axes[i+1].imshow(result_img)
-                axes[i+1].set_title(f"Dist: {distance:.2f}")
+                
+                # Create a title that only includes similarity
+                axes[i+1].set_title(f"Similarity: {similarity:.1f}%")
+                
+                # Add part info at the bottom of the figure, below the image
+                if info:
+                    parent_step = info.get("parent_step", "unknown")
+                    part_name = info.get("part_name", "unknown")
+                    
+                    # Add a text box at the bottom
+                    axes[i+1].text(0.5, -0.15, f"STEP: {parent_step}", 
+                                 horizontalalignment='center', verticalalignment='top', 
+                                 transform=axes[i+1].transAxes, fontsize=8, color='black')
+                    axes[i+1].text(0.5, -0.25, f"Part: {part_name}", 
+                                 horizontalalignment='center', verticalalignment='top', 
+                                 transform=axes[i+1].transAxes, fontsize=8, color='black')
+                
                 axes[i+1].axis('off')
             else:
                 axes[i+1].text(0.5, 0.5, "Image not found", horizontalalignment='center')

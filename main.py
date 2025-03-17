@@ -24,6 +24,8 @@ def parse_args():
     retrieve_parser.add_argument('--query', type=str, required=True, help='Path to query image')
     retrieve_parser.add_argument('--k', type=int, default=10, help='Number of results to retrieve')
     retrieve_parser.add_argument('--visualize', action='store_true', help='Visualize the results')
+    retrieve_parser.add_argument('--rotation-invariant', action='store_true', help='Enable rotation-invariant search')
+    retrieve_parser.add_argument('--num-rotations', type=int, default=8, help='Number of rotations to try')
     
     # Evaluate command
     eval_parser = subparsers.add_parser('evaluate', help='Evaluate retrieval system')
@@ -52,16 +54,34 @@ def main():
     
     elif args.command == 'retrieve':
         print(f"Retrieving similar parts to {args.query}")
+        if args.rotation_invariant:
+            print(f"Using rotation-invariant search with {args.num_rotations} rotations")
+        
         if not os.path.exists(args.query):
             print(f"Error: Query image not found: {args.query}")
             return
         
-        results = retrieval_system.retrieve_similar(args.query, k=args.k)
+        results = retrieval_system.retrieve_similar(
+            args.query, 
+            k=args.k, 
+            rotation_invariant=args.rotation_invariant, 
+            num_rotations=args.num_rotations
+        )
         
         # Print results
         print(f"Top {len(results['paths'])} results:")
-        for i, (path, distance) in enumerate(zip(results["paths"], results["distances"])):
-            print(f"{i+1}. {os.path.basename(path)} (distance: {distance:.4f})")
+        for i, (path, distance, info) in enumerate(zip(results["paths"], results["distances"], results.get("part_info", [None] * len(results["paths"])))):
+            # Convert distance to similarity score (0-100%), where higher is better
+            similarity = 100 * (1 / (1 + distance))
+            print(f"{i+1}. {os.path.basename(path)} (similarity: {similarity:.2f}%)")
+            # Print part information if available
+            if info:
+                parent_step = info.get("parent_step", "unknown")
+                part_name = info.get("part_name", "unknown")
+                print(f"   STEP File: {parent_step}")
+                print(f"   Part Name: {part_name}")
+            # Also print distance for reference
+            print(f"   (distance: {distance:.4f})")
         
         # Visualize if requested
         if args.visualize:

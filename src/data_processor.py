@@ -67,12 +67,14 @@ class DataProcessor:
                         part_metadata = part
                         break
                 
-                # Create part info
+                # Create part info with parent STEP file and part name for easy retrieval
                 part_info.append({
                     "step_id": step_id,
                     "part_id": part_id,
                     "image_path": image_path,
-                    "metadata": part_metadata
+                    "metadata": part_metadata,
+                    "parent_step": step_id,  # Store parent STEP file name
+                    "part_name": part_id if part_metadata is None else part_metadata.get("name", part_id)  # Get part name from metadata or use ID
                 })
         
         return part_info

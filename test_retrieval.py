@@ -32,11 +32,21 @@ def test_system():
         sample_query = os.path.join("data", "output", "evaluation", "queries", "sample_query.png")
         if os.path.exists(sample_query):
             print(f"\n=== Testing retrieval with sample query {sample_query} ===")
-            results = retrieval_system.retrieve_similar(sample_query, k=5)
+            results = retrieval_system.retrieve_similar(sample_query, k=10)
             
-            print("Top 5 results:")
-            for i, (path, distance) in enumerate(zip(results["paths"], results["distances"])):
-                print(f"{i+1}. {os.path.basename(path)} (distance: {distance:.4f})")
+            print("Top 10 results:")
+            for i, (path, distance, info) in enumerate(zip(results["paths"], results["distances"], results.get("part_info", [None] * len(results["paths"])))):
+                # Convert distance to similarity score (0-100%), where higher is better
+                similarity = 100 * (1 / (1 + distance))
+                print(f"{i+1}. {os.path.basename(path)} (similarity: {similarity:.2f}%)")
+                # Print part information if available
+                if info:
+                    parent_step = info.get("parent_step", "unknown")
+                    part_name = info.get("part_name", "unknown")
+                    print(f"   STEP File: {parent_step}")
+                    print(f"   Part Name: {part_name}")
+                # Also print distance for reference
+                print(f"   (distance: {distance:.4f})")
             
             # Visualize results
             retrieval_system.visualize_results(sample_query, results)
