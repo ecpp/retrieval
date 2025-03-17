@@ -46,3 +46,9 @@ retrieval_benchmark/run.log
 
 run.log
 *.pkl
+src/__pycache__/evaluator.cpython-310.pyc
+src/__pycache__/retrieval_system.cpython-310.pyc
+models/faiss_index.bin
+data/output/results/query_results_sample_query.png.png
+models/index_metadata.pkl
+data/
