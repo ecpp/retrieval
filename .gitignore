@@ -7,7 +7,9 @@ embedding_cache/
 lib/
 test.py
 *.png
-
+*.pyc
+__pycache__
+*.bin
 # Python cache files
 __pycache__/
 *.py[cod]
@@ -43,3 +45,4 @@ Thumbs.db
 retrieval_benchmark/run.log
 
 run.log
+*.pkl
