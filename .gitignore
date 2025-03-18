@@ -37,6 +37,7 @@ env/
 retrieval_results_small_dataset/
 *.pth
 *.pkl
+*.pt
 
 # System files
 .DS_Store

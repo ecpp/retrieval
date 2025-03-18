@@ -68,9 +68,16 @@ class RetrievalSystem:
             os.makedirs(bom_dir, exist_ok=True)
             
             # Initialize metadata encoder
+            # Initialize metadata encoder with autoencoder architecture
             self.metadata_encoder = MetadataEncoder(
-                output_dim=self.config.get("metadata", {}).get("embedding_dim", 256)
+                output_dim=self.config.get("metadata", {}).get("embedding_dim", 256),
+                hidden_dims=self.config.get("metadata", {}).get("hidden_dims", [512, 384])
             )
+            
+            # Try to load a pre-trained model if it exists
+            model_path = self.config.get("metadata", {}).get("model_path", "models/metadata_autoencoder.pt")
+            if os.path.exists(model_path):
+                self.metadata_encoder.load_trained_model(model_path)
             
             # Initialize fusion module
             self.fusion_module = FusionModule(
@@ -165,6 +172,7 @@ class RetrievalSystem:
             os.makedirs(bom_dir, exist_ok=True)
             
             # Copy BOM files from the source to the BOM directory
+            bom_files_copied = 0
             for root, dirs, files in os.walk(dataset_dir):
                 for file in files:
                     if file.endswith("_bom.json"):
@@ -175,9 +183,27 @@ class RetrievalSystem:
                         try:
                             with open(src_path, 'r') as src, open(dst_path, 'w') as dst:
                                 dst.write(src.read())
-                            print(f"Copied BOM file: {file} to {bom_dir}")
+                            bom_files_copied += 1
                         except Exception as e:
                             print(f"Error copying BOM file {file}: {e}")
+            
+            print(f"Copied {bom_files_copied} BOM files to {bom_dir}")
+            
+            # Train the autoencoder with the BOM data if we have files and it's enabled
+            if bom_files_copied > 0 and self.config.get("metadata", {}).get("train_autoencoder", True):
+                print("Training metadata autoencoder...")
+                # Create models directory if it doesn't exist
+                model_dir = os.path.dirname(self.config.get("metadata", {}).get("model_path", "models/metadata_autoencoder.pt"))
+                os.makedirs(model_dir, exist_ok=True)
+                
+                # Train the autoencoder
+                self.metadata_encoder.train_autoencoder(
+                    bom_dir=bom_dir,
+                    batch_size=self.config.get("metadata", {}).get("batch_size", 32),
+                    epochs=self.config.get("metadata", {}).get("epochs", 50),
+                    lr=self.config.get("metadata", {}).get("learning_rate", 1e-4),
+                    save_path=self.config.get("metadata", {}).get("model_path", "models/metadata_autoencoder.pt")
+                )
         
         # Return the processed parts
         return all_parts
@@ -529,10 +555,14 @@ class RetrievalSystem:
         }
         
         if self.use_metadata:
+            autoencoder_trained = self.metadata_encoder.trained if hasattr(self.metadata_encoder, 'trained') else False
             metadata_info.update({
                 "embedding_dim": self.config.get("metadata", {}).get("embedding_dim"),
                 "fusion_method": self.config.get("metadata", {}).get("fusion_method"),
-                "bom_dir": self.config.get("metadata", {}).get("bom_dir")
+                "bom_dir": self.config.get("metadata", {}).get("bom_dir"),
+                "autoencoder_trained": autoencoder_trained,
+                "autoencoder_hidden_dims": self.config.get("metadata", {}).get("hidden_dims", [512, 384]),
+                "autoencoder_model_path": self.config.get("metadata", {}).get("model_path", "models/metadata_autoencoder.pt")
             })
         
         return {
