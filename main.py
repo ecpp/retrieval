@@ -18,6 +18,7 @@ def parse_args():
     # Build index command
     build_parser = subparsers.add_parser('build', help='Build vector index from images')
     build_parser.add_argument('--image_dir', type=str, help='Directory containing images to index')
+    build_parser.add_argument('--use-metadata', action='store_true', help='Use metadata for indexing')
     
     # Retrieve command
     retrieve_parser = subparsers.add_parser('retrieve', help='Retrieve similar parts')
@@ -26,11 +27,13 @@ def parse_args():
     retrieve_parser.add_argument('--visualize', action='store_true', help='Visualize the results')
     retrieve_parser.add_argument('--rotation-invariant', action='store_true', help='Enable rotation-invariant search')
     retrieve_parser.add_argument('--num-rotations', type=int, default=8, help='Number of rotations to try')
+    retrieve_parser.add_argument('--use-metadata', action='store_true', help='Use metadata for retrieval')
     
     # Evaluate command
     eval_parser = subparsers.add_parser('evaluate', help='Evaluate retrieval system')
     eval_parser.add_argument('--query_dir', type=str, help='Directory containing query images')
     eval_parser.add_argument('--ground_truth', type=str, help='Path to ground truth JSON file')
+    eval_parser.add_argument('--use-metadata', action='store_true', help='Use metadata for evaluation')
     
     # Info command
     subparsers.add_parser('info', help='Display system information')
@@ -43,6 +46,11 @@ def main():
     
     # Initialize the retrieval system
     retrieval_system = RetrievalSystem()
+    
+    # Override metadata usage based on command line arguments
+    if hasattr(args, 'use_metadata') and args.use_metadata:
+        retrieval_system.use_metadata = True
+        print("Metadata integration enabled via command line")
     
     if args.command == 'ingest':
         print(f"Ingesting data from {args.dataset_dir}")
@@ -99,6 +107,10 @@ def main():
         print(f"Device: {info['model']['device']}")
         print(f"Index: {info['index']['index_type']}")
         print(f"Vectors in index: {info['index']['num_vectors']}")
+        print(f"Metadata enabled: {retrieval_system.use_metadata}")
+        if retrieval_system.use_metadata:
+            print(f"Metadata embedding dimension: {info.get('metadata', {}).get('embedding_dim')}")
+            print(f"Fusion method: {info.get('metadata', {}).get('fusion_method')}")
     
     else:
         print("Please specify a command. Run with --help for options.")

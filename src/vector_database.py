@@ -42,7 +42,7 @@ class VectorDatabase:
             metadata (list): Optional list of metadata dictionaries for each embedding
         """
         if isinstance(embeddings, torch.Tensor):
-            embeddings = embeddings.numpy()
+            embeddings = embeddings.detach().numpy()
         
         # Get the current size of the index
         start_id = self.index.ntotal

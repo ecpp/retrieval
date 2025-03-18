@@ -19,3 +19,9 @@ training:
   
 evaluation:
   top_k: [1, 5, 10, 20]
+
+metadata:
+  enabled: true  # Enabled metadata integration
+  embedding_dim: 256
+  fusion_method: "weighted"  # Options: "concat", "weighted"
+  bom_dir: "data/output/bom"

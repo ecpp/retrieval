@@ -1,5 +1,7 @@
 import torch
 import numpy as np
+import os
+import json
 from PIL import Image
 import torchvision.transforms.functional as TF
 import matplotlib.pyplot as plt
@@ -82,7 +84,8 @@ def batch_rotate_tensor(tensor, num_rotations=8):
     
     return torch.cat(rotated_tensors, dim=0)
 
-def rotation_invariant_search(image_encoder, vector_db, query_image_path, k=10, num_rotations=8):
+def rotation_invariant_search(image_encoder, vector_db, query_image_path, k=10, num_rotations=8,
+                              use_metadata=False, metadata_encoder=None, fusion_module=None, bom_dir=None):
     """
     Perform rotation-invariant search
     
@@ -92,6 +95,10 @@ def rotation_invariant_search(image_encoder, vector_db, query_image_path, k=10, 
         query_image_path (str): Path to query image
         k (int): Number of results to return
         num_rotations (int): Number of rotations to try
+        use_metadata (bool): Whether to use metadata
+        metadata_encoder: Encoder for metadata
+        fusion_module: Module for fusing visual and metadata embeddings
+        bom_dir (str): Directory containing BOM data
         
     Returns:
         dict: Search results
@@ -115,8 +122,51 @@ def rotation_invariant_search(image_encoder, vector_db, query_image_path, k=10, 
                 embedding = image_encoder.model(input_tensor).squeeze().cpu()
         embeddings.append(embedding)
     
-    # Stack embeddings
-    embeddings = torch.cat(embeddings, dim=0)
+    # Process metadata if enabled and components are available
+    if use_metadata and metadata_encoder is not None and fusion_module is not None and bom_dir is not None:
+        # Extract part info from the image path
+        parts = os.path.basename(query_image_path).split('_')
+        if len(parts) > 1:
+            parent_step = parts[0]
+            part_name = '_'.join(parts[1:]).split('.')[0]  # Remove extension
+        else:
+            parent_step = "unknown"
+            part_name = os.path.splitext(os.path.basename(query_image_path))[0]
+        
+        # Look for BOM data
+        bom_path = os.path.join(bom_dir, f"{parent_step}_bom.json")
+        
+        if os.path.exists(bom_path):
+            # Load BOM data
+            try:
+                bom_data = metadata_encoder.load_bom_data(bom_path)
+                
+                # Find metadata for this part
+                part_metadata = metadata_encoder.find_part_metadata(bom_data, part_name)
+                
+                if part_metadata:
+                    # Encode metadata
+                    metadata_embedding = metadata_encoder.encode_metadata(part_metadata)
+                    
+                    # Fuse embeddings for each rotation
+                    fused_embeddings = []
+                    for visual_embedding in embeddings:
+                        fused_embedding = fusion_module.fuse(visual_embedding, metadata_embedding)
+                        fused_embeddings.append(fused_embedding)
+                    
+                    # Replace regular embeddings with fused ones
+                    embeddings = fused_embeddings
+            except Exception as e:
+                print(f"Error processing metadata for {query_image_path}: {e}")
+    
+    # Stack embeddings if they're tensors
+    if isinstance(embeddings[0], torch.Tensor):
+        try:
+            embeddings = torch.cat(embeddings, dim=0)
+        except Exception as e:
+            print(f"Error stacking embeddings: {e}")
+            # Fall back to processing individually
+            pass
     
     # Search with each embedding
     all_results = []

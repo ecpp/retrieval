@@ -4,11 +4,22 @@ import json
 import torch
 from PIL import Image
 import matplotlib.pyplot as plt
+from tqdm import tqdm
 from .image_encoder import ImageEncoder
 from .vector_database import VectorDatabase
 from .data_processor import DataProcessor
 from .evaluator import RetrievalEvaluator
 from .rotational_utils import rotation_invariant_search
+
+# Import new components for Phase 2
+try:
+    from .metadata_encoder import MetadataEncoder
+    from .fusion_module import FusionModule
+    METADATA_AVAILABLE = True
+    print("Successfully imported metadata components")
+except ImportError as e:
+    METADATA_AVAILABLE = False
+    print(f"ImportError: Could not import metadata components: {e}")
 
 class RetrievalSystem:
     """
@@ -31,7 +42,7 @@ class RetrievalSystem:
         os.makedirs(self.config["data"]["database_dir"], exist_ok=True)
         os.makedirs(os.path.dirname(self.config["indexing"]["index_file"]), exist_ok=True)
         
-        # Initialize components
+        # Initialize image encoder
         self.image_encoder = ImageEncoder(
             model_name=self.config["model"]["name"],
             pretrained=self.config["model"]["pretrained"],
@@ -39,16 +50,48 @@ class RetrievalSystem:
             image_size=self.config["model"]["image_size"]
         )
         
+        # Initialize vector database
         self.vector_db = VectorDatabase(
             embedding_dim=self.config["model"]["embedding_dim"],
             index_file=self.config["indexing"]["index_file"],
             metadata_file=self.config["indexing"]["metadata_file"]
         )
         
+        # Initialize metadata components
+        self.use_metadata = self.config.get("metadata", {}).get("enabled", False)
+        self.metadata_encoder = None
+        self.fusion_module = None
+        
+        if METADATA_AVAILABLE and self.use_metadata:
+            # Create metadata directory
+            bom_dir = self.config.get("metadata", {}).get("bom_dir", "data/output/bom")
+            os.makedirs(bom_dir, exist_ok=True)
+            
+            # Initialize metadata encoder
+            self.metadata_encoder = MetadataEncoder(
+                output_dim=self.config.get("metadata", {}).get("embedding_dim", 256)
+            )
+            
+            # Initialize fusion module
+            self.fusion_module = FusionModule(
+                visual_dim=self.config["model"]["embedding_dim"],
+                metadata_dim=self.config.get("metadata", {}).get("embedding_dim", 256),
+                output_dim=self.config["model"]["embedding_dim"],
+                fusion_method=self.config.get("metadata", {}).get("fusion_method", "concat")
+            )
+            
+            print(f"Metadata integration enabled with {self.config.get('metadata', {}).get('fusion_method', 'concat')} fusion")
+        else:
+            if not METADATA_AVAILABLE:
+                print("Metadata components not available - reverting to visual-only search")
+            self.use_metadata = False
+        
+        # Initialize data processor
         self.data_processor = DataProcessor(
             output_dir=self.config["data"]["output_dir"]
         )
         
+        # Initialize evaluator
         self.evaluator = RetrievalEvaluator(
             image_encoder=self.image_encoder,
             vector_db=self.vector_db,
@@ -116,6 +159,26 @@ class RetrievalSystem:
         # Save processed data
         self.data_processor.save_processed_data(all_parts)
         
+        # Copy BOM files to the BOM directory if metadata is enabled
+        if self.use_metadata:
+            bom_dir = self.config.get("metadata", {}).get("bom_dir", "data/output/bom")
+            os.makedirs(bom_dir, exist_ok=True)
+            
+            # Copy BOM files from the source to the BOM directory
+            for root, dirs, files in os.walk(dataset_dir):
+                for file in files:
+                    if file.endswith("_bom.json"):
+                        src_path = os.path.join(root, file)
+                        dst_path = os.path.join(bom_dir, file)
+                        
+                        # Copy file
+                        try:
+                            with open(src_path, 'r') as src, open(dst_path, 'w') as dst:
+                                dst.write(src.read())
+                            print(f"Copied BOM file: {file} to {bom_dir}")
+                        except Exception as e:
+                            print(f"Error copying BOM file {file}: {e}")
+        
         # Return the processed parts
         return all_parts
     
@@ -132,18 +195,137 @@ class RetrievalSystem:
         if image_dir is None:
             image_dir = os.path.join(self.config["data"]["output_dir"], "images")
         
-        # Build the index with metadata extraction
-        count = self.vector_db.build_from_directory(
-            self.image_encoder,
-            image_dir,
-            batch_size=self.config["training"]["batch_size"],
-            metadata_func=self.extract_part_info  # Pass the metadata extraction function
-        )
+        if self.use_metadata and self.metadata_encoder and self.fusion_module:
+            print("Building index with metadata integration...")
+            # Build the index with metadata-enhanced embeddings
+            count = self._build_index_with_metadata(image_dir)
+        else:
+            if self.use_metadata:
+                print("Metadata integration was requested but components are not available.")
+                print("Falling back to visual features only...")
+            else:
+                print("Building index with visual features only...")
+                
+            # Build the index with regular visual embeddings
+            count = self.vector_db.build_from_directory(
+                self.image_encoder,
+                image_dir,
+                batch_size=self.config["training"]["batch_size"],
+                metadata_func=self.extract_part_info
+            )
         
         # Save the index
         self.vector_db.save()
         
         return count
+    
+    def _build_index_with_metadata(self, image_dir):
+        """
+        Build the index with metadata integration
+        
+        Args:
+            image_dir (str): Directory containing images to index
+            
+        Returns:
+            count (int): Number of images indexed
+        """
+        # Collect all image paths
+        image_paths = []
+        extensions = ('.png', '.jpg', '.jpeg')
+        for root, _, files in os.walk(image_dir):
+            for file in files:
+                if file.lower().endswith(extensions):
+                    full_path = os.path.join(root, file)
+                    image_paths.append(full_path)
+        
+        if not image_paths:
+            print(f"No images found in {image_dir} with extensions {extensions}")
+            return 0
+        
+        print(f"Found {len(image_paths)} images, generating embeddings with metadata...")
+        
+        # Dictionary to cache BOM data to avoid repeated loading
+        bom_cache = {}
+        
+        # Process images in batches
+        batch_size = self.config["training"]["batch_size"]
+        for i in tqdm(range(0, len(image_paths), batch_size)):
+            batch_paths = image_paths[i:i+batch_size]
+            
+            # Get visual embeddings
+            batch_visual_embeddings = self.image_encoder.encode_batch(batch_paths, batch_size)
+            
+            # Prepare for metadata integration
+            batch_metadata = []
+            batch_metadata_embeddings = []
+            
+            # For each image, extract part info and find metadata
+            for path in batch_paths:
+                part_info = self.extract_part_info(path)
+                batch_metadata.append(part_info)
+                
+                # Try to find BOM data for this part
+                metadata_found = False
+                if part_info and part_info.get("parent_step"):
+                    parent_step = part_info["parent_step"]
+                    part_name = part_info["part_name"]
+                    
+                    # Get BOM path
+                    bom_dir = self.config.get("metadata", {}).get("bom_dir")
+                    bom_path = os.path.join(bom_dir, f"{parent_step}_bom.json")
+                    
+                    # Check if BOM exists
+                    if os.path.exists(bom_path):
+                        # Load BOM data (or get from cache)
+                        if bom_path not in bom_cache:
+                            bom_cache[bom_path] = self.metadata_encoder.load_bom_data(bom_path)
+                        
+                        bom_data = bom_cache[bom_path]
+                        
+                        # Find metadata for this part
+                        part_metadata = self.metadata_encoder.find_part_metadata(bom_data, part_name)
+                        
+                        if part_metadata:
+                            # Encode metadata
+                            metadata_embedding = self.metadata_encoder.encode_metadata(part_metadata)
+                            batch_metadata_embeddings.append(metadata_embedding)
+                            metadata_found = True
+            
+                # If no metadata found, use a zero embedding of the right size
+                if not metadata_found:
+                    zero_embedding = torch.zeros((1, self.metadata_encoder.output_dim), 
+                                                device=self.metadata_encoder.device)
+                    batch_metadata_embeddings.append(zero_embedding)
+            
+            # Combine all metadata embeddings
+            if batch_metadata_embeddings:
+                metadata_embeddings = torch.cat(batch_metadata_embeddings, dim=0)
+                
+                # Ensure dimensions match
+                if metadata_embeddings.shape[0] != batch_visual_embeddings.shape[0]:
+                    print(f"Warning: Metadata batch size ({metadata_embeddings.shape[0]}) doesn't match visual batch size ({batch_visual_embeddings.shape[0]})")
+                    # Adjust to the smaller size
+                    min_size = min(metadata_embeddings.shape[0], batch_visual_embeddings.shape[0])
+                    metadata_embeddings = metadata_embeddings[:min_size]
+                    batch_visual_embeddings = batch_visual_embeddings[:min_size]
+                    batch_paths = batch_paths[:min_size]
+                    batch_metadata = batch_metadata[:min_size]
+                
+                # Fuse embeddings
+                batch_fused_embeddings = torch.zeros_like(batch_visual_embeddings)
+                for j in range(batch_visual_embeddings.shape[0]):
+                    visual_emb = batch_visual_embeddings[j:j+1]
+                    metadata_emb = metadata_embeddings[j:j+1]
+                    batch_fused_embeddings[j:j+1] = self.fusion_module.fuse(visual_emb, metadata_emb)
+                
+                # Add to index
+                self.vector_db.add_embeddings(batch_fused_embeddings, batch_paths, batch_metadata)
+            else:
+                # If no metadata embeddings were generated, just use visual
+                self.vector_db.add_embeddings(batch_visual_embeddings, batch_paths, batch_metadata)
+        
+        print(f"Added {len(image_paths)} images to the index")
+        return len(image_paths)
     
     def retrieve_similar(self, query_image_path, k=10, rotation_invariant=True, num_rotations=8):
         """
@@ -168,7 +350,11 @@ class RetrievalSystem:
                 self.vector_db, 
                 query_image_path, 
                 k=k,
-                num_rotations=num_rotations
+                num_rotations=num_rotations,
+                use_metadata=self.use_metadata,
+                metadata_encoder=self.metadata_encoder if self.use_metadata else None,
+                fusion_module=self.fusion_module if self.use_metadata else None,
+                bom_dir=self.config.get("metadata", {}).get("bom_dir") if self.use_metadata else None
             )
         else:
             # Use standard search
@@ -176,6 +362,31 @@ class RetrievalSystem:
             
             if query_embedding is None:
                 return {"error": f"Failed to encode query image: {query_image_path}"}
+            
+            # If metadata is enabled, try to find and incorporate it
+            if self.use_metadata and self.metadata_encoder and self.fusion_module:
+                # Extract part info from the image path
+                part_info = self.extract_part_info(query_image_path)
+                
+                # Look for BOM data
+                bom_dir = self.config.get("metadata", {}).get("bom_dir")
+                if bom_dir and part_info:
+                    # Construct BOM path
+                    bom_path = os.path.join(bom_dir, f"{part_info['parent_step']}_bom.json")
+                    
+                    if os.path.exists(bom_path):
+                        # Load BOM data
+                        bom_data = self.metadata_encoder.load_bom_data(bom_path)
+                        
+                        # Find metadata for this part
+                        part_metadata = self.metadata_encoder.find_part_metadata(bom_data, part_info.get("part_name"))
+                        
+                        if part_metadata:
+                            # Encode metadata
+                            metadata_embedding = self.metadata_encoder.encode_metadata(part_metadata)
+                            
+                            # Fuse embeddings
+                            query_embedding = self.fusion_module.fuse(query_embedding, metadata_embedding)
             
             # Search the database
             results = self.vector_db.search(query_embedding, k=k)
@@ -312,8 +523,21 @@ class RetrievalSystem:
             "device": str(next(self.image_encoder.model.parameters()).device)
         }
         
+        # Add metadata info if enabled
+        metadata_info = {
+            "enabled": self.use_metadata
+        }
+        
+        if self.use_metadata:
+            metadata_info.update({
+                "embedding_dim": self.config.get("metadata", {}).get("embedding_dim"),
+                "fusion_method": self.config.get("metadata", {}).get("fusion_method"),
+                "bom_dir": self.config.get("metadata", {}).get("bom_dir")
+            })
+        
         return {
             "model": model_info,
             "index": index_stats,
-            "configuration": self.config
+            "configuration": self.config,
+            "metadata": metadata_info
         }
