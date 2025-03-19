@@ -25,7 +25,7 @@ metadata:
   embedding_dim: 256
   fusion_method: "weighted"  # Options: "concat", "weighted"
   bom_dir: "data/output/bom"
-  size_weight: 0.35  # Weight given to size similarity in reranking (0-1) - balanced for new algorithm
+  size_weight: 0.1  # Weight given to size similarity in reranking (0-1) - balanced for new algorithm
 
   # Autoencoder settings
   train_autoencoder: true  # Whether to train the autoencoder on data ingest
