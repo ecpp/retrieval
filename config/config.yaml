@@ -8,15 +8,15 @@ data:
   input_dir: "data/input"
   output_dir: "data/output"
   database_dir: "data/database"
-  
+
 indexing:
   index_file: "models/faiss_index.bin"
   metadata_file: "models/index_metadata.pkl"
-  
+
 training:
   batch_size: 32
   num_workers: 4
-  
+
 evaluation:
   top_k: [1, 5, 10, 20]
 
@@ -25,7 +25,8 @@ metadata:
   embedding_dim: 256
   fusion_method: "weighted"  # Options: "concat", "weighted"
   bom_dir: "data/output/bom"
-  
+  size_weight: 0.35  # Weight given to size similarity in reranking (0-1) - balanced for new algorithm
+
   # Autoencoder settings
   train_autoencoder: true  # Whether to train the autoencoder on data ingest
   hidden_dims: [512, 384]  # Hidden layer dimensions for encoder/decoder
