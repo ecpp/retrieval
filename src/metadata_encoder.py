@@ -108,8 +108,8 @@ class MetadataEncoder:
         self.feature_maxs = None
         
         # Set reasonable clipping thresholds for extreme values
-        self.min_clip_value = -1e5
-        self.max_clip_value = 1e5
+        self.min_clip_value = -1e4
+        self.max_clip_value = 1e4
         
         # Define encoder component
         encoder_layers = []
@@ -182,15 +182,29 @@ class MetadataEncoder:
             # Not enough data to extract features
             raise ValueError("No valid properties dictionary found")
         
+        # Safe extraction function to handle potential errors
+        def safe_extract(value, default=0.0, max_val=1e9, min_val=-1e9):
+            try:
+                # First convert to float
+                val = float(value)
+                # Check if value is valid
+                if not torch.isfinite(torch.tensor(val)):
+                    return default
+                # Apply limits
+                val = max(min(val, max_val), min_val)
+                return val
+            except (ValueError, TypeError, OverflowError) as e:
+                return default
+        
         # Extract dimensional data with fallbacks
         try:
             features.extend([
-                float(properties.get("length", properties.get("Length", 0.0))),
-                float(properties.get("width", properties.get("Width", 0.0))),
-                float(properties.get("height", properties.get("Height", 0.0))),
-                float(properties.get("max_dimension", properties.get("MaxDimension", 0.0))),
-                float(properties.get("min_dimension", properties.get("MinDimension", 0.0))),
-                float(properties.get("mid_dimension", properties.get("MidDimension", 0.0))),
+                safe_extract(properties.get("length", properties.get("Length", 0.0))),
+                safe_extract(properties.get("width", properties.get("Width", 0.0))),
+                safe_extract(properties.get("height", properties.get("Height", 0.0))),
+                safe_extract(properties.get("max_dimension", properties.get("MaxDimension", 0.0))),
+                safe_extract(properties.get("min_dimension", properties.get("MinDimension", 0.0))),
+                safe_extract(properties.get("mid_dimension", properties.get("MidDimension", 0.0))),
             ])
         except (ValueError, TypeError) as e:
             # If conversion fails, use zeros
@@ -200,11 +214,11 @@ class MetadataEncoder:
         # Extract derived dimensional ratios
         try:
             features.extend([
-                float(properties.get("thickness_ratio", properties.get("ThicknessRatio", 0.0))),
-                float(properties.get("width_ratio", properties.get("WidthRatio", 0.0))),
-                float(properties.get("elongation", properties.get("Elongation", 0.0))),
-                float(properties.get("volume_ratio", properties.get("VolumeRatio", 0.0))),
-                float(properties.get("complexity", properties.get("Complexity", 0.0))),
+                safe_extract(properties.get("thickness_ratio", properties.get("ThicknessRatio", 0.0)), max_val=1.0),
+                safe_extract(properties.get("width_ratio", properties.get("WidthRatio", 0.0)), max_val=1.0),
+                safe_extract(properties.get("elongation", properties.get("Elongation", 0.0)), max_val=100.0),
+                safe_extract(properties.get("volume_ratio", properties.get("VolumeRatio", 0.0)), max_val=1.0),
+                safe_extract(properties.get("complexity", properties.get("Complexity", 0.0)), max_val=1.0),
             ])
         except (ValueError, TypeError):
             features.extend([0.0] * 5)
@@ -212,8 +226,8 @@ class MetadataEncoder:
         # Extract volume and surface area
         try:
             features.extend([
-                float(properties.get("volume", properties.get("Volume", 0.0))),
-                float(properties.get("surface_area", properties.get("SurfaceArea", 0.0))),
+                safe_extract(properties.get("volume", properties.get("Volume", 0.0))),
+                safe_extract(properties.get("surface_area", properties.get("SurfaceArea", 0.0))),
             ])
         except (ValueError, TypeError):
             features.extend([0.0] * 2)
@@ -221,12 +235,12 @@ class MetadataEncoder:
         # Extract topological metrics
         try:
             features.extend([
-                int(properties.get("face_count", properties.get("FaceCount", 0))),
-                int(properties.get("edge_count", properties.get("EdgeCount", 0))),
-                int(properties.get("vertex_count", properties.get("VertexCount", 0))),
-                int(properties.get("euler_characteristic", properties.get("EulerCharacteristic", 0))),
-                float(properties.get("edge_to_vertex_ratio", properties.get("EdgeToVertexRatio", 0.0))),
-                float(properties.get("face_to_edge_ratio", properties.get("FaceToEdgeRatio", 0.0))),
+                safe_extract(properties.get("face_count", properties.get("FaceCount", 0))),
+                safe_extract(properties.get("edge_count", properties.get("EdgeCount", 0))),
+                safe_extract(properties.get("vertex_count", properties.get("VertexCount", 0))),
+                safe_extract(properties.get("euler_characteristic", properties.get("EulerCharacteristic", 0))),
+                safe_extract(properties.get("edge_to_vertex_ratio", properties.get("EdgeToVertexRatio", 0.0)), max_val=10.0),
+                safe_extract(properties.get("face_to_edge_ratio", properties.get("FaceToEdgeRatio", 0.0)), max_val=10.0),
             ])
         except (ValueError, TypeError):
             features.extend([0, 0, 0, 0, 0.0, 0.0])
@@ -238,17 +252,17 @@ class MetadataEncoder:
         
         try:    
             features.extend([
-                int(surface_comp.get("planes", surface_comp.get("Planes", 0))),
-                int(surface_comp.get("cylinders", surface_comp.get("Cylinders", 0))),
-                int(surface_comp.get("cones", surface_comp.get("Cones", 0))),
-                int(surface_comp.get("spheres", surface_comp.get("Spheres", 0))),
-                int(surface_comp.get("tori", surface_comp.get("Tori", 0))),
-                int(surface_comp.get("bezier", surface_comp.get("Bezier", 0))),
-                int(surface_comp.get("bspline", surface_comp.get("BSpline", 0))),
-                int(surface_comp.get("revolution", surface_comp.get("Revolution", 0))),
-                int(surface_comp.get("extrusion", surface_comp.get("Extrusion", 0))),
-                int(surface_comp.get("offset", surface_comp.get("Offset", 0))),
-                int(surface_comp.get("other", surface_comp.get("Other", 0))),
+                safe_extract(surface_comp.get("planes", surface_comp.get("Planes", 0)), max_val=1000),
+                safe_extract(surface_comp.get("cylinders", surface_comp.get("Cylinders", 0)), max_val=1000),
+                safe_extract(surface_comp.get("cones", surface_comp.get("Cones", 0)), max_val=1000),
+                safe_extract(surface_comp.get("spheres", surface_comp.get("Spheres", 0)), max_val=1000),
+                safe_extract(surface_comp.get("tori", surface_comp.get("Tori", 0)), max_val=1000),
+                safe_extract(surface_comp.get("bezier", surface_comp.get("Bezier", 0)), max_val=1000),
+                safe_extract(surface_comp.get("bspline", surface_comp.get("BSpline", 0)), max_val=1000),
+                safe_extract(surface_comp.get("revolution", surface_comp.get("Revolution", 0)), max_val=1000),
+                safe_extract(surface_comp.get("extrusion", surface_comp.get("Extrusion", 0)), max_val=1000),
+                safe_extract(surface_comp.get("offset", surface_comp.get("Offset", 0)), max_val=1000),
+                safe_extract(surface_comp.get("other", surface_comp.get("Other", 0)), max_val=1000),
             ])
         except (ValueError, TypeError):
             features.extend([0] * 11)
@@ -260,11 +274,11 @@ class MetadataEncoder:
         
         try:    
             features.extend([
-                float(surface_ratios.get("plane_ratio", surface_ratios.get("PlaneRatio", 0.0))),
-                float(surface_ratios.get("cylinder_ratio", surface_ratios.get("CylinderRatio", 0.0))),
-                float(surface_ratios.get("cone_ratio", surface_ratios.get("ConeRatio", 0.0))),
-                float(surface_ratios.get("sphere_ratio", surface_ratios.get("SphereRatio", 0.0))),
-                float(surface_ratios.get("torus_ratio", surface_ratios.get("TorusRatio", 0.0))),
+                safe_extract(surface_ratios.get("plane_ratio", surface_ratios.get("PlaneRatio", 0.0)), max_val=1.0),
+                safe_extract(surface_ratios.get("cylinder_ratio", surface_ratios.get("CylinderRatio", 0.0)), max_val=1.0),
+                safe_extract(surface_ratios.get("cone_ratio", surface_ratios.get("ConeRatio", 0.0)), max_val=1.0),
+                safe_extract(surface_ratios.get("sphere_ratio", surface_ratios.get("SphereRatio", 0.0)), max_val=1.0),
+                safe_extract(surface_ratios.get("torus_ratio", surface_ratios.get("TorusRatio", 0.0)), max_val=1.0),
             ])
         except (ValueError, TypeError):
             features.extend([0.0] * 5)
@@ -284,24 +298,24 @@ class MetadataEncoder:
         # Handle both dict and scalar values
         try:
             if isinstance(cylinders, dict):
-                cyl_count = cylinders.get("count", 0)
+                cyl_count = safe_extract(cylinders.get("count", 0), max_val=1000)
             else:
-                cyl_count = int(cylinders) if str(cylinders).isdigit() else 0
+                cyl_count = safe_extract(cylinders, max_val=1000) if str(cylinders).isdigit() else 0
                 
             if isinstance(cones, dict):
-                cone_count = cones.get("count", 0)
+                cone_count = safe_extract(cones.get("count", 0), max_val=1000)
             else:
-                cone_count = int(cones) if str(cones).isdigit() else 0
+                cone_count = safe_extract(cones, max_val=1000) if str(cones).isdigit() else 0
                 
             if isinstance(spheres, dict):
-                sphere_count = spheres.get("count", 0)
+                sphere_count = safe_extract(spheres.get("count", 0), max_val=1000)
             else:
-                sphere_count = int(spheres) if str(spheres).isdigit() else 0
+                sphere_count = safe_extract(spheres, max_val=1000) if str(spheres).isdigit() else 0
                 
             if isinstance(tori, dict):
-                tori_count = tori.get("count", 0)
+                tori_count = safe_extract(tori.get("count", 0), max_val=1000)
             else:
-                tori_count = int(tori) if str(tori).isdigit() else 0
+                tori_count = safe_extract(tori, max_val=1000) if str(tori).isdigit() else 0
             
             features.extend([
                 cyl_count,
@@ -414,6 +428,9 @@ class MetadataEncoder:
         # Work on a copy to avoid modifying the original
         processed = features_tensor.clone()
         
+        # First, handle infinity and NaN values
+        processed = torch.nan_to_num(processed, nan=0.0, posinf=self.max_clip_value, neginf=self.min_clip_value)
+        
         # Clip extreme values if enabled
         if self.clip_values:
             processed = torch.clamp(processed, self.min_clip_value, self.max_clip_value)
@@ -421,7 +438,16 @@ class MetadataEncoder:
         # Apply feature normalization if enabled and parameters are available
         if self.normalization and self.feature_means is not None and self.feature_stds is not None:
             # Apply z-score normalization (mean 0, std 1)
-            processed = (processed - self.feature_means) / (self.feature_stds + 1e-8)
+            # First handle any NaN or infinite values in means/stds
+            safe_means = torch.nan_to_num(self.feature_means, nan=0.0)
+            safe_stds = torch.nan_to_num(self.feature_stds, nan=1.0)
+            # Replace zeros in stds with 1.0 to avoid division by zero
+            safe_stds[safe_stds < 1e-8] = 1.0
+            # Apply normalization
+            processed = (processed - safe_means) / (safe_stds + 1e-8)
+        
+        # One final check to clean any NaN or infinity that might have been introduced
+        processed = torch.nan_to_num(processed, nan=0.0, posinf=3.0, neginf=-3.0)
         
         return processed
         
@@ -436,22 +462,33 @@ class MetadataEncoder:
             print("Warning: Empty dataset, cannot compute scaling parameters.")
             return
         
+        print("Computing scaling parameters from dataset...")
         # Create a dataloader to process the dataset in batches
         dataloader = DataLoader(dataset, batch_size=min(1000, len(dataset)), shuffle=False)
         
         # Collect all feature values
         all_features = []
         for batch in dataloader:
-            all_features.append(batch)
+            # Handle any NaN or infinity in input data
+            clean_batch = torch.nan_to_num(batch, nan=0.0, posinf=self.max_clip_value, neginf=self.min_clip_value)
+            # Apply clipping
+            clean_batch = torch.clamp(clean_batch, self.min_clip_value, self.max_clip_value)
+            all_features.append(clean_batch)
         
         # Concatenate all batches
         all_features = torch.cat(all_features, dim=0)
         
-        # Compute statistics
+        # Compute statistics with safeguards against NaN/inf
         self.feature_means = torch.mean(all_features, dim=0).to(self.device)
         self.feature_stds = torch.std(all_features, dim=0).to(self.device)
         self.feature_mins = torch.min(all_features, dim=0)[0].to(self.device)
         self.feature_maxs = torch.max(all_features, dim=0)[0].to(self.device)
+        
+        # Replace any remaining NaN or infinite values in the statistics
+        self.feature_means = torch.nan_to_num(self.feature_means, nan=0.0)
+        self.feature_stds = torch.nan_to_num(self.feature_stds, nan=1.0)
+        self.feature_mins = torch.nan_to_num(self.feature_mins, nan=-self.max_clip_value, posinf=self.max_clip_value, neginf=-self.max_clip_value)
+        self.feature_maxs = torch.nan_to_num(self.feature_maxs, nan=self.max_clip_value, posinf=self.max_clip_value, neginf=-self.max_clip_value)
         
         # Replace zero standard deviations with 1.0 to avoid division by zero
         self.feature_stds[self.feature_stds < 1e-8] = 1.0
@@ -469,7 +506,8 @@ class MetadataEncoder:
         if len(extreme_indices) > 0:
             print(f"\nExtreme feature values detected in {len(extreme_indices)} features:")
             for idx in extreme_indices:
-                print(f"Feature {idx.item()}: min={self.feature_mins[idx].item():.4f}, max={self.feature_maxs[idx].item():.4f}, mean={self.feature_means[idx].item():.4f}, std={self.feature_stds[idx].item():.4f}")
+                i = idx.item()
+                print(f"Feature {i}: min={self.feature_mins[i].item():.4f}, max={self.feature_maxs[i].item():.4f}, mean={self.feature_means[i].item():.4f}, std={self.feature_stds[i].item():.4f}")
     
     def train_autoencoder(self, bom_dir, batch_size=32, epochs=50, lr=1e-4, save_path=None):
         """
@@ -616,11 +654,36 @@ class MetadataEncoder:
         Returns:
             metadata (dict): Part metadata or None if not found
         """
-        if not bom_data:
+        if not bom_data or not isinstance(bom_data, dict):
             return None
             
-        for part in bom_data.get("parts", []):
-            if part.get("name") == part_name:
-                return part
-                
+        # Handle different BOM data structures
+        # Case 1: Standard structure with "parts" list
+        if "parts" in bom_data and isinstance(bom_data.get("parts"), list):
+            for part in bom_data.get("parts", []):
+                # Skip if part is not a dictionary
+                if not isinstance(part, dict):
+                    continue
+                    
+                if part.get("name") == part_name:
+                    return part
+        
+        # Case 2: Part name is a direct key in the BOM data
+        if part_name in bom_data and isinstance(bom_data[part_name], dict):
+            return bom_data[part_name]
+        
+        # Case 3: Search through all top-level keys for matching part
+        for key, value in bom_data.items():
+            if isinstance(value, dict):
+                # Check if this item has a name field that matches
+                if value.get("name") == part_name or key == part_name:
+                    return value
+            elif isinstance(value, list):
+                # Check if there's a list with dictionaries
+                for item in value:
+                    if isinstance(item, dict) and item.get("name") == part_name:
+                        return item
+        
+        # If we still haven't found it, just print a message and skip this part
+        print(f"Warning: Could not find metadata for part '{part_name}' in BOM data")
         return None
