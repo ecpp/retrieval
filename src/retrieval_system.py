@@ -816,10 +816,10 @@ class RetrievalSystem:
                 similarities = [100 * (1 / (1 + d)) for d in results["distances"]]
 
             # Number of results to display
-            n_results = min(len(result_paths), 10)  # Limit to a reasonable number
+            n_results = len(result_paths)
 
             # Create a figure with n+1 subplots (query + results)
-            fig_width = min(20, 2 * (n_results + 1))  # Cap the width to a reasonable size
+            fig_width = max(20, 2 * (n_results + 1))  # Cap the width to a reasonable size
             fig = plt.figure(figsize=(fig_width, 4))
 
             # Create grid spec for better layout control
