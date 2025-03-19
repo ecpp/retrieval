@@ -4,6 +4,7 @@ import sys
 import argparse
 from src.retrieval_system import RetrievalSystem
 
+
 def parse_args():
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(description='CAD Part Retrieval System')
@@ -13,7 +14,11 @@ def parse_args():
 
     # Ingest command
     ingest_parser = subparsers.add_parser('ingest', help='Ingest data from STEP output directories')
-    ingest_parser.add_argument('--dataset_dir', type=str, required=True, help='Directory containing STEP output directories')
+
+    ingest_parser.add_argument('--dataset_dir', type=str, required=True,
+                               help='Directory containing STEP output directories')
+
+
 
     # Build index command
     build_parser = subparsers.add_parser('build', help='Build vector index from images')
@@ -39,6 +44,7 @@ def parse_args():
     subparsers.add_parser('info', help='Display system information')
 
     return parser.parse_args()
+
 
 def main():
     """Main entry point"""
@@ -143,6 +149,7 @@ def main():
 
     else:
         print("Please specify a command. Run with --help for options.")
+
 
 if __name__ == "__main__":
     main()
