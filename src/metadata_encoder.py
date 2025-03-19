@@ -88,7 +88,7 @@ class MetadataEncoder:
     """
     Encodes CAD part metadata from BOM data into embeddings using an autoencoder
     """
-    def __init__(self, output_dim=256, hidden_dims=[512, 384]):
+    def __init__(self, output_dim=256, hidden_dims=[512, 384], clip_values=True, normalization=True):
         """
         Initialize the metadata encoder with autoencoder architecture
         
@@ -98,6 +98,18 @@ class MetadataEncoder:
         """
         self.output_dim = output_dim
         self.hidden_dims = hidden_dims
+        self.clip_values = clip_values  # Whether to clip extreme values
+        self.normalization = normalization  # Whether to apply feature normalization
+        
+        # Initialize feature scaling parameters
+        self.feature_means = None
+        self.feature_stds = None
+        self.feature_mins = None
+        self.feature_maxs = None
+        
+        # Set reasonable clipping thresholds for extreme values
+        self.min_clip_value = -1e5
+        self.max_clip_value = 1e5
         
         # Define encoder component
         encoder_layers = []
@@ -326,9 +338,18 @@ class MetadataEncoder:
         # Convert to tensor
         features_tensor = torch.tensor(features, dtype=torch.float32).to(self.device)
         
-        # Normalize if requested
+        # Apply preprocessing
+        if self.clip_values:
+            features_tensor = torch.clamp(features_tensor, self.min_clip_value, self.max_clip_value)
+        
+        # Normalize if requested and parameters are available
         if normalize:
-            features_tensor = (features_tensor - features_tensor.mean()) / (features_tensor.std() + 1e-6)
+            if self.feature_means is not None and self.feature_stds is not None:
+                # Apply global normalization
+                features_tensor = (features_tensor - self.feature_means) / (self.feature_stds + 1e-8)
+            else:
+                # Fallback to per-sample normalization
+                features_tensor = (features_tensor - features_tensor.mean()) / (features_tensor.std() + 1e-6)
         
         # Pass through the encoder
         with torch.no_grad():
@@ -346,6 +367,16 @@ class MetadataEncoder:
         Returns:
             reconstructed (torch.Tensor): Reconstructed features
         """
+        # Apply preprocessing if the input hasn't been preprocessed yet
+        if self.normalization and self.feature_means is not None:
+            # Check if data is already normalized by comparing statistics
+            tensor_mean = torch.mean(features_tensor).item()
+            tensor_std = torch.std(features_tensor).item()
+            
+            # If statistics suggest this isn't normalized, preprocess it
+            if abs(tensor_mean) > 5.0 or abs(tensor_std - 1.0) > 5.0:
+                features_tensor = self._preprocess_features(features_tensor)
+        
         # Encode
         embedding = self.encoder(features_tensor)
         # Decode
@@ -370,6 +401,76 @@ class MetadataEncoder:
         
         return torch.cat(embeddings, dim=0)
         
+    def _preprocess_features(self, features_tensor):
+        """
+        Apply preprocessing to features tensor including clipping and normalization
+        
+        Args:
+            features_tensor (torch.Tensor): Input features tensor
+            
+        Returns:
+            processed_tensor (torch.Tensor): Processed features tensor
+        """
+        # Work on a copy to avoid modifying the original
+        processed = features_tensor.clone()
+        
+        # Clip extreme values if enabled
+        if self.clip_values:
+            processed = torch.clamp(processed, self.min_clip_value, self.max_clip_value)
+        
+        # Apply feature normalization if enabled and parameters are available
+        if self.normalization and self.feature_means is not None and self.feature_stds is not None:
+            # Apply z-score normalization (mean 0, std 1)
+            processed = (processed - self.feature_means) / (self.feature_stds + 1e-8)
+        
+        return processed
+        
+    def _compute_scaling_parameters(self, dataset):
+        """
+        Compute feature scaling parameters from the dataset
+        
+        Args:
+            dataset (BomDataset): Dataset to compute parameters from
+        """
+        if len(dataset) == 0:
+            print("Warning: Empty dataset, cannot compute scaling parameters.")
+            return
+        
+        # Create a dataloader to process the dataset in batches
+        dataloader = DataLoader(dataset, batch_size=min(1000, len(dataset)), shuffle=False)
+        
+        # Collect all feature values
+        all_features = []
+        for batch in dataloader:
+            all_features.append(batch)
+        
+        # Concatenate all batches
+        all_features = torch.cat(all_features, dim=0)
+        
+        # Compute statistics
+        self.feature_means = torch.mean(all_features, dim=0).to(self.device)
+        self.feature_stds = torch.std(all_features, dim=0).to(self.device)
+        self.feature_mins = torch.min(all_features, dim=0)[0].to(self.device)
+        self.feature_maxs = torch.max(all_features, dim=0)[0].to(self.device)
+        
+        # Replace zero standard deviations with 1.0 to avoid division by zero
+        self.feature_stds[self.feature_stds < 1e-8] = 1.0
+        
+        # Print summary of scaling parameters
+        print("\nFeature scaling parameters computed:")
+        print(f"Mean range: [{torch.min(self.feature_means).item():.4f}, {torch.max(self.feature_means).item():.4f}]")
+        print(f"Std range: [{torch.min(self.feature_stds).item():.4f}, {torch.max(self.feature_stds).item():.4f}]")
+        print(f"Min value: {torch.min(self.feature_mins).item():.4f}")
+        print(f"Max value: {torch.max(self.feature_maxs).item():.4f}")
+        
+        # Identify extreme features
+        extreme_threshold = 1e6
+        extreme_indices = torch.where(torch.abs(self.feature_maxs) > extreme_threshold)[0]
+        if len(extreme_indices) > 0:
+            print(f"\nExtreme feature values detected in {len(extreme_indices)} features:")
+            for idx in extreme_indices:
+                print(f"Feature {idx.item()}: min={self.feature_mins[idx].item():.4f}, max={self.feature_maxs[idx].item():.4f}, mean={self.feature_means[idx].item():.4f}, std={self.feature_stds[idx].item():.4f}")
+    
     def train_autoencoder(self, bom_dir, batch_size=32, epochs=50, lr=1e-4, save_path=None):
         """
         Train the autoencoder using BOM data
@@ -390,6 +491,10 @@ class MetadataEncoder:
         if len(dataset) == 0:
             print("No BOM data found for training. Autoencoder training skipped.")
             return {"train_loss": []}
+            
+        # Compute feature scaling parameters
+        print("Computing feature scaling parameters...")
+        self._compute_scaling_parameters(dataset)
             
         dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
         
@@ -414,11 +519,14 @@ class MetadataEncoder:
                 # Zero gradients
                 self.optimizer.zero_grad()
                 
-                # Forward pass - reconstruct input
-                reconstructed = self.reconstruct(batch)
+                # Preprocess the batch
+                preprocessed_batch = self._preprocess_features(batch)
                 
-                # Compute reconstruction loss
-                loss = self.criterion(reconstructed, batch)
+                # Forward pass - reconstruct input
+                reconstructed = self.reconstruct(preprocessed_batch)
+                
+                # Compute reconstruction loss - compare with preprocessed input, not raw input
+                loss = self.criterion(reconstructed, preprocessed_batch)
                 
                 # Backward pass and optimize
                 loss.backward()
@@ -439,7 +547,11 @@ class MetadataEncoder:
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
             torch.save({
                 "encoder": self.encoder.state_dict(),
-                "decoder": self.decoder.state_dict()
+                "decoder": self.decoder.state_dict(),
+                "feature_means": self.feature_means,
+                "feature_stds": self.feature_stds,
+                "feature_mins": self.feature_mins,
+                "feature_maxs": self.feature_maxs
             }, save_path)
             print(f"Saved trained autoencoder to {save_path}")
         
@@ -460,6 +572,15 @@ class MetadataEncoder:
             checkpoint = torch.load(model_path, map_location=self.device)
             self.encoder.load_state_dict(checkpoint["encoder"])
             self.decoder.load_state_dict(checkpoint["decoder"])
+            
+            # Load scaling parameters if available
+            if "feature_means" in checkpoint:
+                self.feature_means = checkpoint["feature_means"]
+                self.feature_stds = checkpoint["feature_stds"]
+                self.feature_mins = checkpoint["feature_mins"]
+                self.feature_maxs = checkpoint["feature_maxs"]
+                print("Loaded feature scaling parameters from checkpoint")
+            
             self.trained = True
             print(f"Successfully loaded trained model from {model_path}")
             return True
