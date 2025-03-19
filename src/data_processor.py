@@ -37,8 +37,17 @@ class DataProcessor:
             return []
         
         # Load BOM data
-        with open(bom_file, 'r') as f:
-            bom_data = json.load(f)
+        try:
+            with open(bom_file, 'r') as f:
+                bom_data = json.load(f)
+                
+            # Verify we got a dictionary
+            if not isinstance(bom_data, dict):
+                print(f"Warning: BOM file {bom_file} did not contain a valid dictionary")
+                bom_data = {}
+        except Exception as e:
+            print(f"Error loading BOM file {bom_file}: {e}")
+            bom_data = {}
         
         # Process part images and metadata
         part_info = []
@@ -62,10 +71,31 @@ class DataProcessor:
                 
                 # Find corresponding metadata in BOM
                 part_metadata = None
-                for part in bom_data.get("parts", []):
-                    if part.get("id") == part_id or part.get("name") == part_id:
-                        part_metadata = part
-                        break
+                
+                # Handle different BOM structures
+                if "parts" in bom_data and isinstance(bom_data.get("parts"), list):
+                    # Standard structure with parts list
+                    for part in bom_data.get("parts", []):
+                        # Check if part is a dictionary
+                        if not isinstance(part, dict):
+                            continue
+                            
+                        if part.get("id") == part_id or part.get("name") == part_id:
+                            part_metadata = part
+                            break
+                else:
+                    # Alternative structure where BOM data is directly key-value pairs
+                    # This handles the case where the file structure is different
+                    if part_id in bom_data and isinstance(bom_data[part_id], dict):
+                        part_metadata = bom_data[part_id]
+                    elif isinstance(bom_data, dict):
+                        # Try to find the part by iterating through all items
+                        for key, value in bom_data.items():
+                            if isinstance(value, dict):
+                                # Check if this item matches our part_id
+                                if key == part_id or value.get("id") == part_id or value.get("name") == part_id:
+                                    part_metadata = value
+                                    break
                 
                 # Create part info with parent STEP file and part name for easy retrieval
                 part_info.append({
@@ -91,15 +121,24 @@ class DataProcessor:
         """
         all_parts = []
         
-        for item in os.listdir(dataset_dir):
+        # Get list of files to process
+        items = sorted(os.listdir(dataset_dir))
+        total_items = len(items)
+        
+        for idx, item in enumerate(items):
             item_path = os.path.join(dataset_dir, item)
             
             if os.path.isdir(item_path):
                 # Check if this looks like a STEP output directory
                 if os.path.exists(os.path.join(item_path, f"{item}_bom.json")):
-                    print(f"Processing STEP output: {item}")
-                    parts = self.process_step_output(item_path)
-                    all_parts.extend(parts)
+                    print(f"Processing STEP output: {item} [{idx+1}/{total_items}]")
+                    try:
+                        parts = self.process_step_output(item_path)
+                        all_parts.extend(parts)
+                    except Exception as e:
+                        print(f"Error processing STEP output {item}: {e}")
+                        # Continue with next file instead of crashing
+                        continue
         
         print(f"Processed {len(all_parts)} parts from {dataset_dir}")
         return all_parts

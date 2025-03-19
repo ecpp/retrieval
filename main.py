@@ -14,8 +14,11 @@ def parse_args():
 
     # Ingest command
     ingest_parser = subparsers.add_parser('ingest', help='Ingest data from STEP output directories')
+
     ingest_parser.add_argument('--dataset_dir', type=str, required=True,
                                help='Directory containing STEP output directories')
+
+
 
     # Build index command
     build_parser = subparsers.add_parser('build', help='Build vector index from images')
@@ -81,19 +84,47 @@ def main():
 
         # Print results
         print(f"Top {len(results['paths'])} results:")
-        for i, (path, distance, info) in enumerate(
-                zip(results["paths"], results["distances"], results.get("part_info", [None] * len(results["paths"])))):
-            # Convert distance to similarity score (0-100%), where higher is better
-            similarity = 100 * (1 / (1 + distance))
-            print(f"{i + 1}. {os.path.basename(path)} (similarity: {similarity:.2f}%)")
-            # Print part information if available
+
+        # Create a format string for consistent output
+        format_str = "{:3} | {:30} | {:20} | {:20} | {:8}"
+
+        # Print header
+        print(format_str.format("Rank", "Part", "STEP File", "Part Name", "Similarity"))
+        print("-" * 90)
+
+        for i, (path, info, similarity) in enumerate(zip(
+                results["paths"],
+                results.get("part_info", [None] * len(results["paths"])),
+                results.get("similarities", [None] * len(results["paths"]))
+            )):
+
+            # Get filename without extension
+            filename = os.path.splitext(os.path.basename(path))[0] if path else "N/A"
+
+            # Get part information
+            parent_step = "unknown"
+            part_name = "unknown"
             if info:
                 parent_step = info.get("parent_step", "unknown")
                 part_name = info.get("part_name", "unknown")
-                print(f"   STEP File: {parent_step}")
-                print(f"   Part Name: {part_name}")
-            # Also print distance for reference
-            print(f"   (distance: {distance:.4f})")
+
+            # Use recalibrated similarity score if available, otherwise calculate from distance
+            if similarity is not None:
+                similarity_str = f"{similarity:.1f}%"
+            else:
+                # Legacy fallback - calculate from distance
+                distance = results["distances"][i]
+                fallback_similarity = 100 * (1 / (1 + distance))
+                similarity_str = f"{fallback_similarity:.1f}%"
+
+            # Print the result in a nicely formatted table
+            print(format_str.format(
+                f"{i+1}.",
+                filename,
+                parent_step,
+                part_name,
+                similarity_str
+            ))
 
         # Visualize if requested
         if args.visualize:
