@@ -307,21 +307,27 @@ class RetrievalSystem:
 
                     # Check if BOM exists
                     if os.path.exists(bom_path):
-                        # Load BOM data (or get from cache)
-                        if bom_path not in bom_cache:
-                            bom_cache[bom_path] = self.metadata_encoder.load_bom_data(bom_path)
-
-                        bom_data = bom_cache[bom_path]
-
-                        # Find metadata for this part
-                        part_metadata = self.metadata_encoder.find_part_metadata(bom_data, part_name)
-
-                        if part_metadata:
-                            # Encode metadata
-                            metadata_embedding = self.metadata_encoder.encode_metadata(part_metadata)
-                            batch_metadata_embeddings.append(metadata_embedding)
-                            metadata_found = True
-
+                        try:
+                            # Load BOM data (or get from cache)
+                            if bom_path not in bom_cache:
+                                bom_cache[bom_path] = self.metadata_encoder.load_bom_data(bom_path)
+                            
+                            bom_data = bom_cache[bom_path]
+                            
+                            # Find metadata for this part
+                            part_metadata = self.metadata_encoder.find_part_metadata(bom_data, part_name)
+                            
+                            if part_metadata:
+                                # Encode metadata
+                                metadata_embedding = self.metadata_encoder.encode_metadata(part_metadata)
+                                batch_metadata_embeddings.append(metadata_embedding)
+                                metadata_found = True
+                        except Exception as e:
+                            print(f"Error processing metadata for {path} (part: {part_name}): {e}")
+                            # Add to problematic files log for reference
+                            with open(os.path.join(self.config["data"]["output_dir"], "problematic_bom_files.txt"), "a") as log:
+                                log.write(f"{bom_path}: {e}\n")
+            
                 # If no metadata found, use a zero embedding of the right size
                 if not metadata_found:
                     zero_embedding = torch.zeros((1, self.metadata_encoder.output_dim),
