@@ -4,6 +4,7 @@ import shutil
 from PIL import Image
 import torch
 import numpy as np
+from tqdm import tqdm
 
 class DataProcessor:
     """
@@ -161,7 +162,9 @@ class DataProcessor:
         
         image_mapping = {}
         
-        for part in all_parts:
+        # Add tqdm progress bar
+        print("Copying images to flat structure:")
+        for part in tqdm(all_parts, desc="Copying images", unit="image"):
             src_path = part["image_path"]
             
             if not os.path.exists(src_path):
@@ -215,6 +218,7 @@ class DataProcessor:
             
             serializable_parts.append(part_data)
         
+        print(f"Saving {len(serializable_parts)} parts to JSON...")
         # Save to JSON
         with open(output_file, 'w') as f:
             json.dump(serializable_parts, f, indent=2)

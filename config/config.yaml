@@ -37,7 +37,7 @@ metadata:
   size_weight: 0.1  # Weight given to size similarity in reranking (0-1) - balanced for new algorithm
 
   # Autoencoder settings
-  train_autoencoder: true  # Whether to train the autoencoder on data ingest
+  train_autoencoder: false  # Auto training on ingest disabled, use 'train-autoencoder' command instead
   hidden_dims: [512, 384]  # Hidden layer dimensions for encoder/decoder
   model_path: "models/metadata_autoencoder.pt"  # Path to save/load the trained model
   batch_size: 32  # Batch size for autoencoder training

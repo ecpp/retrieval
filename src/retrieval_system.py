@@ -194,21 +194,9 @@ class RetrievalSystem:
 
             print(f"Copied {bom_files_copied} BOM files to {bom_dir}")
 
-            # Train the autoencoder with the BOM data if we have files and it's enabled
-            if bom_files_copied > 0 and self.config.get("metadata", {}).get("train_autoencoder", True):
-                print("Training metadata autoencoder...")
-                # Create models directory if it doesn't exist
-                model_dir = os.path.dirname(self.config.get("metadata", {}).get("model_path", "models/metadata_autoencoder.pt"))
-                os.makedirs(model_dir, exist_ok=True)
-
-                # Train the autoencoder
-                self.metadata_encoder.train_autoencoder(
-                    bom_dir=bom_dir,
-                    batch_size=self.config.get("metadata", {}).get("batch_size", 32),
-                    epochs=self.config.get("metadata", {}).get("epochs", 50),
-                    lr=self.config.get("metadata", {}).get("learning_rate", 1e-4),
-                    save_path=self.config.get("metadata", {}).get("model_path", "models/metadata_autoencoder.pt")
-                )
+            # Note: Autoencoder training is now a separate process and not automatically done during ingestion
+            print(f"Copied {bom_files_copied} BOM files to {bom_dir}")
+            print("To train the autoencoder, use the 'train-autoencoder' command")
 
         # Return the processed parts
         return all_parts
@@ -228,6 +216,18 @@ class RetrievalSystem:
 
         if self.use_metadata and self.metadata_encoder and self.fusion_module:
             print("Building index with metadata integration...")
+            
+            # Check if autoencoder model is trained/loaded
+            model_path = self.config.get("metadata", {}).get("model_path", "models/metadata_autoencoder.pt")
+            if not os.path.exists(model_path):
+                # Provide a clear error message with exact command to run
+                error_msg = f"\nERROR: Autoencoder model not found at {model_path}\n\n"
+                error_msg += "You've enabled metadata integration (--use-metadata), but the autoencoder model is not trained.\n"
+                error_msg += "Please train the autoencoder first using the following command:\n\n"
+                error_msg += "    python main.py train-autoencoder --use-metadata\n\n"
+                error_msg += "Once training is complete, you can build the index with metadata integration.\n"
+                raise ValueError(error_msg)
+            
             # Build the index with metadata-enhanced embeddings
             count = self._build_index_with_metadata(image_dir)
         else:

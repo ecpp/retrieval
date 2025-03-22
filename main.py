@@ -26,6 +26,15 @@ def parse_args():
     ingest_parser.add_argument('--dataset_dir', type=str, required=True,
                                help='Directory containing STEP output directories')
 
+    # Train autoencoder command
+    train_parser = subparsers.add_parser('train-autoencoder', help='Train metadata autoencoder for improved retrieval')
+    train_parser.add_argument('--bom_dir', type=str, help='Directory containing BOM files (default: data/output/bom)')
+    train_parser.add_argument('--batch_size', type=int, help='Batch size for training')
+    train_parser.add_argument('--epochs', type=int, help='Number of epochs to train')
+    train_parser.add_argument('--lr', type=float, help='Learning rate')
+    train_parser.add_argument('--evaluate', action='store_true', help='Evaluate autoencoder after training')
+    train_parser.add_argument('--use-metadata', action='store_true', help='Enable metadata integration')
+
 
 
     # Build index command
@@ -73,9 +82,56 @@ def main():
         print(f"Ingesting data from {args.dataset_dir}")
         retrieval_system.ingest_data(args.dataset_dir)
 
+    elif args.command == 'train-autoencoder':
+        # Make sure metadata is enabled first
+        if not retrieval_system.use_metadata:
+            print("Error: Metadata integration is not enabled. Please enable it in config.yaml or use --use-metadata.")
+            return
+            
+        print("Training metadata autoencoder...")
+        
+        # Get BOM directory
+        bom_dir = args.bom_dir or retrieval_system.config.get("metadata", {}).get("bom_dir", "data/output/bom")
+        
+        # Create models directory if it doesn't exist
+        model_path = retrieval_system.config.get("metadata", {}).get("model_path", "models/metadata_autoencoder.pt")
+        model_dir = os.path.dirname(model_path)
+        os.makedirs(model_dir, exist_ok=True)
+        
+        # Get training parameters
+        batch_size = args.batch_size or retrieval_system.config.get("metadata", {}).get("batch_size", 32)
+        epochs = args.epochs or retrieval_system.config.get("metadata", {}).get("epochs", 50)
+        lr = args.lr or retrieval_system.config.get("metadata", {}).get("learning_rate", 1e-4)
+        
+        # Train the autoencoder
+        history = retrieval_system.metadata_encoder.train_autoencoder(
+            bom_dir=bom_dir,
+            batch_size=batch_size,
+            epochs=epochs,
+            lr=lr,
+            save_path=model_path
+        )
+        
+        # Evaluate if requested
+        if args.evaluate and 'train_loss' in history and len(history['train_loss']) > 0:
+            print("Evaluating trained autoencoder...")
+            # Create dataset for evaluation
+            from src.metadata_encoder import BomDataset
+            dataset = BomDataset(bom_dir, retrieval_system.metadata_encoder)
+            
+            # Import evaluate function from train_autoencoder.py
+            from train_autoencoder import evaluate_autoencoder
+            evaluate_autoencoder(retrieval_system.metadata_encoder, dataset)
+        
+        print("Autoencoder training complete!")
+    
     elif args.command == 'build':
         print("Building vector index")
-        retrieval_system.build_index(args.image_dir)
+        try:
+            retrieval_system.build_index(args.image_dir)
+        except ValueError as e:
+            print(f"Error: {e}")
+            return
 
     elif args.command == 'retrieve':
         # Validate input - either query image or part name must be specified

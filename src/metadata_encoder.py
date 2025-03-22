@@ -29,48 +29,58 @@ class BomDataset(Dataset):
             files_loaded = 0
             parts_processed = 0
 
-            for file in os.listdir(bom_files_dir):
-                if file.endswith("_bom.json") or file.endswith(".json"):
-                    files_found += 1
-                    bom_path = os.path.join(bom_files_dir, file)
-                    print(f"Processing {file}...")
+            # Get all BOM files first
+            json_files = [f for f in os.listdir(bom_files_dir) 
+                        if f.endswith("_bom.json") or f.endswith(".json")]
+            files_found = len(json_files)
+            
+            # Add tqdm for file processing
+            print(f"Found {files_found} BOM files to process")
+            for file in tqdm(json_files, desc="Processing BOM files", unit="file"):
+                bom_path = os.path.join(bom_files_dir, file)
 
-                    try:
-                        # Load the JSON file
-                        with open(bom_path, 'r') as f:
-                            bom_data = json.load(f)
+                try:
+                    # Load the JSON file
+                    with open(bom_path, 'r') as f:
+                        bom_data = json.load(f)
 
-                        files_loaded += 1
+                    files_loaded += 1
 
-                        # Print structure for the first file to help debug
-                        if files_loaded == 1:
-                            print(f"BOM file structure keys: {list(bom_data.keys())}")
+                    # Print structure for the first file to help debug
+                    if files_loaded == 1:
+                        print(f"BOM file structure keys: {list(bom_data.keys())}")
 
-                        # In this BOM format, each top-level key is a part
-                        for part_name, part_data in bom_data.items():
-                            try:
-                                # Skip non-dictionary values
-                                if not isinstance(part_data, dict):
-                                    continue
+                    # Get all part items
+                    part_items = []
+                    for part_name, part_data in bom_data.items():
+                        if isinstance(part_data, dict):
+                            part_items.append((part_name, part_data))
+                    
+                    # Only show inner progress bar if there are enough parts
+                    if len(part_items) > 10:
+                        part_iterator = tqdm(part_items, desc=f"  Parts in {file}", unit="part", leave=False)
+                    else:
+                        part_iterator = part_items
+                        
+                    # Process each part
+                    for part_name, part_data in part_iterator:
+                        try:
+                            # Extract features directly from the part data
+                            # (it already contains the properties dictionary)
+                            features = self.metadata_encoder.extract_features(part_data)
+                            if len(features) == self.metadata_encoder.get_input_dim():
+                                self.features_list.append(features)
+                                parts_processed += 1
+                        except Exception as e:
+                            print(f"Error extracting features from part '{part_name}': {e}")
+                            if parts_processed == 0:
+                                # Print the part structure to help debug
+                                print(f"Part structure sample: {list(part_data.keys())[:10] if isinstance(part_data, dict) else type(part_data)}")
 
-                                # Extract features directly from the part data
-                                # (it already contains the properties dictionary)
-                                features = self.metadata_encoder.extract_features(part_data)
-                                if len(features) == self.metadata_encoder.get_input_dim():
-                                    self.features_list.append(features)
-                                    parts_processed += 1
-                                    if parts_processed % 50 == 0:
-                                        print(f"Processed {parts_processed} parts so far")
-                            except Exception as e:
-                                print(f"Error extracting features from part '{part_name}': {e}")
-                                if parts_processed == 0:
-                                    # Print the part structure to help debug
-                                    print(f"Part structure sample: {list(part_data.keys())[:10] if isinstance(part_data, dict) else type(part_data)}")
+                except Exception as e:
+                    print(f"Error processing BOM file {file}: {e}")
 
-                    except Exception as e:
-                        print(f"Error processing BOM file {file}: {e}")
-
-            print(f"Found {files_found} BOM files, loaded {files_loaded} successfully, processed {parts_processed} parts")
+            print(f"Processed {files_found} BOM files, loaded {files_loaded} successfully, extracted features from {parts_processed} parts")
         else:
             print(f"Directory {bom_files_dir} does not exist!")
 

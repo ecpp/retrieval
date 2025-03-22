@@ -37,7 +37,21 @@ Process STEP file outputs and prepare them for indexing:
 python main.py ingest --dataset_dir /path/to/step/outputs
 ```
 
-### 2. Build Index
+### 2. Train Metadata Autoencoder (Optional)
+
+If you plan to use metadata integration, train the autoencoder on BOM files:
+
+```
+python main.py train-autoencoder --evaluate
+```
+
+You can customize training with additional parameters:
+
+```
+python main.py train-autoencoder --bom_dir /path/to/bom/files --batch_size 64 --epochs 100 --lr 0.0001
+```
+
+### 3. Build Index
 
 Build the vector index from processed part images:
 
@@ -45,7 +59,13 @@ Build the vector index from processed part images:
 python main.py build
 ```
 
-### 3. Retrieve Similar Parts
+To enable metadata integration (requires trained autoencoder):
+
+```
+python main.py build --use-metadata
+```
+
+### 4. Retrieve Similar Parts
 
 Find parts similar to a query image:
 
@@ -53,7 +73,7 @@ Find parts similar to a query image:
 python main.py retrieve --query /path/to/query/image.png --k 10 --visualize
 ```
 
-### 4. Evaluate System
+### 5. Evaluate System
 
 Evaluate the retrieval system's performance:
 
@@ -61,7 +81,7 @@ Evaluate the retrieval system's performance:
 python main.py evaluate --query_dir /path/to/query/images --ground_truth /path/to/ground_truth.json
 ```
 
-### 5. System Information
+### 6. System Information
 
 Display information about the retrieval system:
 
