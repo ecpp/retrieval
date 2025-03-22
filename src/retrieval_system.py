@@ -939,6 +939,205 @@ class RetrievalSystem:
 
         return results
 
+    def find_part_by_name(self, part_name, threshold=None):
+        """
+        Find a part by name and return its image path
+
+        Args:
+            part_name (str): Name of the part to search for
+            threshold (float): Minimum similarity score (0-1) for matching
+
+        Returns:
+            best_match (dict): Dictionary with image path and similarity score of the best match
+        """
+        # Use configured threshold if none provided
+        if threshold is None:
+            threshold = self.config.get("text_search", {}).get("default_threshold", 0.7)
+        """
+        Find a part by name and return its image path
+
+        Args:
+            part_name (str): Name of the part to search for
+            threshold (float): Minimum similarity score (0-1) for matching
+
+        Returns:
+            best_match (dict): Dictionary with image path and similarity score of the best match
+        """
+        if not part_name or not self.vector_db.metadata or "part_info" not in self.vector_db.metadata:
+            print(f"No part metadata available to search for '{part_name}'")
+            return None
+
+        print(f"Searching for part matching name: '{part_name}'")
+        best_match = None
+        best_score = 0
+
+        # Normalize the query part name for better matching
+        query_norm = self._normalize_part_name(part_name)
+        
+        # Go through all parts in the index
+        for idx, part_info in self.vector_db.metadata["part_info"].items():
+            if not part_info or "part_name" not in part_info:
+                continue
+
+            # Get the part name and normalize it
+            current_part_name = part_info["part_name"]
+            current_norm = self._normalize_part_name(current_part_name)
+            
+            # Calculate similarity score
+            similarity = self._calculate_name_similarity(query_norm, current_norm)
+            
+            if similarity > best_score:
+                best_score = similarity
+                image_path = self.vector_db.metadata["id_to_path"].get(idx)
+                best_match = {
+                    "path": image_path,
+                    "similarity": similarity,
+                    "part_name": current_part_name,
+                    "part_info": part_info
+                }
+                
+                # If we find an exact match, we can stop searching
+                if similarity >= 0.99:
+                    break
+        
+        # Only return matches above the threshold
+        if best_match and best_score >= threshold:
+            print(f"Best match: '{best_match['part_name']}' with {best_match['similarity']:.2f} similarity")
+            return best_match
+        else:
+            print(f"No matches found above threshold {threshold}")
+            return None
+
+    def _normalize_part_name(self, part_name):
+        """
+        Normalize part name for better matching
+        
+        Args:
+            part_name (str): Original part name
+            
+        Returns:
+            normalized (str): Normalized part name
+        """
+        if not part_name:
+            return ""
+            
+        # Convert to lowercase
+        normalized = part_name.lower()
+        
+        # Remove common prefixes/suffixes that might vary
+        prefixes = ["part_", "component_", "assembly_", "asm_"]
+        for prefix in prefixes:
+            if normalized.startswith(prefix):
+                normalized = normalized[len(prefix):]
+                
+        # Remove numbers and special characters (but keep spaces)
+        import re
+        # Keep letters and spaces, replace everything else with spaces
+        cleaned = re.sub(r'[^a-z ]', ' ', normalized)
+        # Replace multiple spaces with a single space
+        cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+        
+        return cleaned
+
+    def _calculate_name_similarity(self, name1, name2):
+        """
+        Calculate similarity between two part names
+        
+        Args:
+            name1 (str): First normalized part name
+            name2 (str): Second normalized part name
+            
+        Returns:
+            similarity (float): Similarity score between 0 and 1
+        """
+        if not name1 or not name2:
+            return 0.0
+            
+        # If one is a subset of the other, it's a good match
+        if name1 in name2 or name2 in name1:
+            # Calculate the ratio of the shorter to the longer string
+            min_len = min(len(name1), len(name2))
+            max_len = max(len(name1), len(name2))
+            if max_len == 0:  # Avoid division by zero
+                return 0.0
+            return min_len / max_len
+        
+        # Otherwise, calculate character-level similarity
+        # Using Jaccard similarity on character sets
+        set1 = set(name1)
+        set2 = set(name2)
+        intersection = len(set1.intersection(set2))
+        union = len(set1.union(set2))
+        
+        if union == 0:  # Avoid division by zero
+            return 0.0
+            
+        # Basic Jaccard similarity
+        jaccard = intersection / union
+        
+        # If the sets are very similar but the strings are different lengths,
+        # adjust the score to reflect the difference in length
+        len_ratio = min(len(name1), len(name2)) / max(len(name1), len(name2)) if max(len(name1), len(name2)) > 0 else 0
+        
+        # Words in common (for multi-word part names)
+        words1 = set(name1.split())
+        words2 = set(name2.split())
+        word_intersection = len(words1.intersection(words2))
+        word_union = len(words1.union(words2))
+        word_jaccard = word_intersection / word_union if word_union > 0 else 0
+        
+        # Get weights from config if available
+        weights = self.config.get("text_search", {}).get("similarity_weights", {})
+        jaccard_weight = weights.get("jaccard", 0.4)
+        len_ratio_weight = weights.get("length_ratio", 0.3)
+        word_jaccard_weight = weights.get("word_jaccard", 0.3)
+        
+        # Combine metrics with weights
+        similarity = (jaccard_weight * jaccard) + \
+                     (len_ratio_weight * len_ratio) + \
+                     (word_jaccard_weight * word_jaccard)
+        
+        return similarity
+
+    def retrieve_by_part_name(self, part_name, k=10, rotation_invariant=True, num_rotations=8, threshold=None):
+        """
+        Find a part by name and then retrieve similar parts using visual search
+
+        Args:
+            part_name (str): Name of the part to search for
+            k (int): Number of results to retrieve
+            rotation_invariant (bool): Whether to perform rotation-invariant search
+            num_rotations (int): Number of rotations to try if rotation_invariant is True
+            threshold (float): Minimum similarity score (0-1) for matching part names
+
+        Returns:
+            results (dict): Search results
+        """
+        # First find the part by name
+        part_match = self.find_part_by_name(part_name, threshold=threshold)
+        
+        if not part_match or "path" not in part_match or not part_match["path"]:
+            print(f"Could not find a part matching '{part_name}'")
+            return {"paths": [], "distances": [], "similarities": []}
+            
+        # Use the found part's image as a query
+        query_image_path = part_match["path"]
+        print(f"Found part image at {query_image_path}, using it as query for visual search")
+        
+        # Perform visual search with the found image
+        results = self.retrieve_similar(
+            query_image_path,
+            k=k,
+            rotation_invariant=rotation_invariant,
+            num_rotations=num_rotations
+        )
+        
+        # Add the original query info to the results
+        results["query_part_name"] = part_name
+        results["query_match"] = part_match
+        
+        return results
+        
     def get_system_info(self):
         """
         Get information about the retrieval system

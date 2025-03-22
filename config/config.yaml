@@ -13,6 +13,15 @@ indexing:
   index_file: "models/faiss_index.bin"
   metadata_file: "models/index_metadata.pkl"
 
+text_search:
+  default_threshold: 0.7  # Default similarity threshold for text search (0-1)
+  normalize_names: true  # Whether to normalize part names before matching
+  # Weights for different similarity metrics
+  similarity_weights:
+    jaccard: 0.4         # Weight for character-level Jaccard similarity
+    length_ratio: 0.3    # Weight for length ratio similarity
+    word_jaccard: 0.3    # Weight for word-level Jaccard similarity
+
 training:
   batch_size: 32
   num_workers: 4
