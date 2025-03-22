@@ -8,7 +8,7 @@ from src.retrieval_system import RetrievalSystem
 def parse_args():
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(
-        description='CAD Part Retrieval System - Search by image or part name', 
+        description='CAD Part Retrieval System - Search by image or part name',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         epilog="""Examples:
         - Search by image: python main.py retrieve --query path/to/image.png --k 5 --visualize
@@ -51,7 +51,7 @@ def parse_args():
     retrieve_parser.add_argument('--rotation-invariant', action='store_true', help='Enable rotation-invariant search')
     retrieve_parser.add_argument('--num-rotations', type=int, default=8, help='Number of rotations to try')
     retrieve_parser.add_argument('--use-metadata', action='store_true', help='Use metadata for retrieval')
-    retrieve_parser.add_argument('--match-threshold', type=float, default=0.7, 
+    retrieve_parser.add_argument('--match-threshold', type=float, default=0.7,
                                  help='Threshold for part name matching (0-1)')
 
     # Evaluate command
@@ -87,22 +87,22 @@ def main():
         if not retrieval_system.use_metadata:
             print("Error: Metadata integration is not enabled. Please enable it in config.yaml or use --use-metadata.")
             return
-            
+
         print("Training metadata autoencoder...")
-        
+
         # Get BOM directory
         bom_dir = args.bom_dir or retrieval_system.config.get("metadata", {}).get("bom_dir", "data/output/bom")
-        
+
         # Create models directory if it doesn't exist
         model_path = retrieval_system.config.get("metadata", {}).get("model_path", "models/metadata_autoencoder.pt")
         model_dir = os.path.dirname(model_path)
         os.makedirs(model_dir, exist_ok=True)
-        
+
         # Get training parameters
         batch_size = args.batch_size or retrieval_system.config.get("metadata", {}).get("batch_size", 32)
         epochs = args.epochs or retrieval_system.config.get("metadata", {}).get("epochs", 50)
         lr = args.lr or retrieval_system.config.get("metadata", {}).get("learning_rate", 1e-4)
-        
+
         # Train the autoencoder
         history = retrieval_system.metadata_encoder.train_autoencoder(
             bom_dir=bom_dir,
@@ -111,20 +111,20 @@ def main():
             lr=lr,
             save_path=model_path
         )
-        
+
         # Evaluate if requested
         if args.evaluate and 'train_loss' in history and len(history['train_loss']) > 0:
             print("Evaluating trained autoencoder...")
             # Create dataset for evaluation
             from src.metadata_encoder import BomDataset
             dataset = BomDataset(bom_dir, retrieval_system.metadata_encoder)
-            
+
             # Import evaluate function from train_autoencoder.py
             from train_autoencoder import evaluate_autoencoder
             evaluate_autoencoder(retrieval_system.metadata_encoder, dataset)
-        
+
         print("Autoencoder training complete!")
-    
+
     elif args.command == 'build':
         print("Building vector index")
         try:
@@ -138,30 +138,30 @@ def main():
         if not args.query and not args.part_name:
             print("Error: Either --query or --part-name must be specified")
             return
-        
+
         if args.query and args.part_name:
             print("Warning: Both query image and part name specified, using query image")
             args.part_name = None
-            
+
         # Process part name search if specified
         if args.part_name:
             print(f"Searching for part name: {args.part_name}")
             if args.rotation_invariant:
                 print(f"Using rotation-invariant search with {args.num_rotations} rotations")
-                
+
             # First find the part by name using the threshold
             part_match = retrieval_system.find_part_by_name(
                 args.part_name,
                 threshold=args.match_threshold
             )
-            
+
             # If no match found, exit early
             if not part_match:
                 print(f"Could not find a part matching '{args.part_name}' with threshold {args.match_threshold}")
                 return
-                
+
             print(f"Found matching part: '{part_match['part_name']}' with {part_match['similarity']:.2f} similarity")
-                
+
             # Now retrieve similar parts
             results = retrieval_system.retrieve_by_part_name(
                 args.part_name,
@@ -170,7 +170,7 @@ def main():
                 num_rotations=args.num_rotations,
                 threshold=args.match_threshold
             )
-            
+
             # If successful, set args.query to the matched image path for visualization
             if results and "paths" in results and len(results["paths"]) > 0:
                 if "query_match" in results and "path" in results["query_match"]:
@@ -240,7 +240,11 @@ def main():
 
             # Visualize if requested
             if args.visualize and args.query:
-                retrieval_system.visualize_results(args.query, results)
+                # For part name searches, pass the results directly for proper naming
+                if args.part_name:
+                    retrieval_system.visualize_results(args.query, results)
+                else:
+                    retrieval_system.visualize_results(args.query, results)
         else:
             print("No results found.")
 
