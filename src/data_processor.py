@@ -5,6 +5,8 @@ from PIL import Image
 import torch
 import numpy as np
 from tqdm import tqdm
+import concurrent.futures
+import multiprocessing
 
 class DataProcessor:
     """
@@ -126,13 +128,12 @@ class DataProcessor:
         items = sorted(os.listdir(dataset_dir))
         total_items = len(items)
         
-        for idx, item in enumerate(items):
+        for item in tqdm(items, desc="Processing STEP outputs", unit="file"):
             item_path = os.path.join(dataset_dir, item)
             
             if os.path.isdir(item_path):
                 # Check if this looks like a STEP output directory
                 if os.path.exists(os.path.join(item_path, f"{item}_bom.json")):
-                    print(f"Processing STEP output: {item} [{idx+1}/{total_items}]")
                     try:
                         parts = self.process_step_output(item_path)
                         all_parts.extend(parts)
@@ -144,13 +145,14 @@ class DataProcessor:
         print(f"Processed {len(all_parts)} parts from {dataset_dir}")
         return all_parts
 
-    def copy_to_flat_structure(self, all_parts, dest_dir=None):
+    def copy_to_flat_structure(self, all_parts, dest_dir=None, max_workers=None):
         """
         Copy all part images to a flat directory structure for easier processing
         
         Args:
             all_parts (list): List of dictionaries with part information
             dest_dir (str): Destination directory (default: self.output_dir/images)
+            max_workers (int): Maximum number of threads to use (default: CPU count / 2)
             
         Returns:
             image_mapping (dict): Mapping of original to new image paths
@@ -158,33 +160,71 @@ class DataProcessor:
         if dest_dir is None:
             dest_dir = os.path.join(self.output_dir, "images")
         
+        if max_workers is None:
+            max_workers = max(1, multiprocessing.cpu_count() // 2)
+            
         os.makedirs(dest_dir, exist_ok=True)
         
-        image_mapping = {}
-        
-        # Add tqdm progress bar
-        print("Copying images to flat structure:")
-        for part in tqdm(all_parts, desc="Copying images", unit="image"):
+        def copy_single_file(part):
             src_path = part["image_path"]
+            result = {"success": False}
             
             if not os.path.exists(src_path):
-                print(f"Warning: Image not found: {src_path}")
-                continue
+                return {
+                    "success": False,
+                    "src_path": src_path,
+                    "error": "Source file not found"
+                }
             
             # Create a unique filename
             filename = f"{part['step_id']}_{part['part_id']}.png"
             dest_path = os.path.join(dest_dir, filename)
             
-            # Copy the file
-            shutil.copy2(src_path, dest_path)
-            
-            # Store the mapping
-            image_mapping[src_path] = dest_path
-            
-            # Update the part info
-            part["flat_image_path"] = dest_path
+            try:
+                # Copy the file
+                shutil.copy2(src_path, dest_path)
+                
+                # Return the result
+                return {
+                    "success": True,
+                    "src_path": src_path,
+                    "dest_path": dest_path,
+                    "part": part
+                }
+            except Exception as e:
+                return {
+                    "success": False,
+                    "src_path": src_path,
+                    "error": str(e)
+                }
         
-        print(f"Copied {len(image_mapping)} images to {dest_dir}")
+        image_mapping = {}
+        
+        print("Copying images to flat structure using multithreading:")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all copy tasks
+            future_to_part = {executor.submit(copy_single_file, part): part for part in all_parts}
+            
+            # Process results as they complete with a progress bar
+            failed_copies = 0
+            for future in tqdm(concurrent.futures.as_completed(future_to_part), 
+                              total=len(all_parts), 
+                              desc="Copying images", 
+                              unit="image"):
+                result = future.result()
+                if result["success"]:
+                    # Store the mapping
+                    image_mapping[result["src_path"]] = result["dest_path"]
+                    
+                    # Update the part info
+                    result["part"]["flat_image_path"] = result["dest_path"]
+                else:
+                    failed_copies += 1
+                    if "error" in result:
+                        print(f"Warning: Failed to copy {result['src_path']}: {result['error']}")
+        
+        successful_copies = len(image_mapping)
+        print(f"Copied {successful_copies} images to {dest_dir} ({failed_copies} failed)")
         return image_mapping
 
     def save_processed_data(self, all_parts, output_file=None):

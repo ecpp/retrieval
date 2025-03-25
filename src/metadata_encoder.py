@@ -4,6 +4,9 @@ import torch.optim as optim
 import numpy as np
 import json
 import os
+import concurrent.futures
+import threading
+import multiprocessing
 from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
 
@@ -11,16 +14,23 @@ class BomDataset(Dataset):
     """
     Dataset for BOM metadata training
     """
-    def __init__(self, bom_files_dir, metadata_encoder):
+    def __init__(self, bom_files_dir, metadata_encoder, max_workers=None):
         """
         Initialize dataset from a directory of BOM files
 
         Args:
             bom_files_dir (str): Directory containing BOM JSON files
             metadata_encoder (MetadataEncoder): Encoder used to extract features
+            max_workers (int, optional): Maximum number of threads to use. Defaults to CPU count / 2.
         """
         self.features_list = []
         self.metadata_encoder = metadata_encoder
+        self.lock = threading.Lock()  # Lock for thread-safe access to shared data
+        
+        # Set default max_workers to CPU count / 2 if not specified
+        if max_workers is None:
+            max_workers = max(1, multiprocessing.cpu_count() // 2)
+            print(f"Using {max_workers} worker threads (half of available CPU cores)")
 
         # Load all BOM files and extract features
         if os.path.exists(bom_files_dir):
@@ -34,57 +44,94 @@ class BomDataset(Dataset):
                         if f.endswith("_bom.json") or f.endswith(".json")]
             files_found = len(json_files)
             
-            # Add tqdm for file processing
             print(f"Found {files_found} BOM files to process")
-            for file in tqdm(json_files, desc="Processing BOM files", unit="file"):
-                bom_path = os.path.join(bom_files_dir, file)
-
-                try:
-                    # Load the JSON file
-                    with open(bom_path, 'r') as f:
-                        bom_data = json.load(f)
-
-                    files_loaded += 1
-
-                    # Print structure for the first file to help debug
-                    if files_loaded == 1:
-                        print(f"BOM file structure keys: {list(bom_data.keys())}")
-
-                    # Get all part items
-                    part_items = []
-                    for part_name, part_data in bom_data.items():
-                        if isinstance(part_data, dict):
-                            part_items.append((part_name, part_data))
-                    
-                    # Only show inner progress bar if there are enough parts
-                    if len(part_items) > 10:
-                        part_iterator = tqdm(part_items, desc=f"  Parts in {file}", unit="part", leave=False)
-                    else:
-                        part_iterator = part_items
-                        
-                    # Process each part
-                    for part_name, part_data in part_iterator:
-                        try:
-                            # Extract features directly from the part data
-                            # (it already contains the properties dictionary)
-                            features = self.metadata_encoder.extract_features(part_data)
-                            if len(features) == self.metadata_encoder.get_input_dim():
-                                self.features_list.append(features)
-                                parts_processed += 1
-                        except Exception as e:
-                            print(f"Error extracting features from part '{part_name}': {e}")
-                            if parts_processed == 0:
-                                # Print the part structure to help debug
-                                print(f"Part structure sample: {list(part_data.keys())[:10] if isinstance(part_data, dict) else type(part_data)}")
-
-                except Exception as e:
-                    print(f"Error processing BOM file {file}: {e}")
+            
+            # Process files in parallel using ThreadPoolExecutor
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # Create a dictionary to store future objects 
+                future_to_file = {
+                    executor.submit(
+                        self._process_bom_file, 
+                        os.path.join(bom_files_dir, file), 
+                        file
+                    ): file for file in json_files
+                }
+                
+                # Use tqdm to track progress of completed futures
+                for future in tqdm(
+                    concurrent.futures.as_completed(future_to_file), 
+                    total=len(json_files),
+                    desc="Processing BOM files", 
+                    unit="file"
+                ):
+                    file = future_to_file[future]
+                    try:
+                        file_parts, loaded = future.result()
+                        with self.lock:
+                            files_loaded += loaded
+                            parts_processed += file_parts
+                    except Exception as e:
+                        print(f"Error processing BOM file {file}: {e}")
 
             print(f"Processed {files_found} BOM files, loaded {files_loaded} successfully, extracted features from {parts_processed} parts")
         else:
             print(f"Directory {bom_files_dir} does not exist!")
 
         print(f"Loaded {len(self.features_list)} metadata samples for training")
+
+    def _process_bom_file(self, bom_path, file):
+        """
+        Process a single BOM file
+        
+        Args:
+            bom_path (str): Path to the BOM file
+            file (str): Filename for logging
+            
+        Returns:
+            tuple: (number of parts processed, 1 if file loaded successfully else 0)
+        """
+        file_parts_processed = 0
+        file_loaded = 0
+        
+        try:
+            # Load the JSON file
+            with open(bom_path, 'r') as f:
+                bom_data = json.load(f)
+
+            file_loaded = 1
+
+            # Print structure for debugging (only first file, thread safe)
+            with self.lock:
+                if sum(1 for _ in self.features_list) == 0:
+                    print(f"BOM file structure keys: {list(bom_data.keys())}")
+
+            # Get all part items
+            part_items = []
+            for part_name, part_data in bom_data.items():
+                if isinstance(part_data, dict):
+                    part_items.append((part_name, part_data))
+            
+            # Process each part (no tqdm here as we're in a thread)
+            for part_name, part_data in part_items:
+                try:
+                    # Extract features directly from the part data
+                    features = self.metadata_encoder.extract_features(part_data)
+                    if len(features) == self.metadata_encoder.get_input_dim():
+                        # Thread-safe append to the features list
+                        with self.lock:
+                            self.features_list.append(features)
+                            file_parts_processed += 1
+                except Exception as e:
+                    print(f"Error extracting features from part '{part_name}' in file {file}: {e}")
+                    # Thread-safe check and print
+                    with self.lock:
+                        if sum(1 for _ in self.features_list) == 0:
+                            print(f"Part structure sample: {list(part_data.keys())[:10] if isinstance(part_data, dict) else type(part_data)}")
+
+        except Exception as e:
+            print(f"Error processing BOM file {file}: {e}")
+            
+        return file_parts_processed, file_loaded
 
     def __len__(self):
         return len(self.features_list)
