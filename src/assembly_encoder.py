@@ -5,6 +5,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from tqdm import tqdm
+import re
+from collections import defaultdict
 
 # Check if torch_geometric is available
 try:
@@ -107,10 +109,11 @@ class AssemblyEncoder:
     """
     Encoder for assembly hierarchical graphs
     """
-    def __init__(self, feature_dim=512, hidden_dim=256, embedding_dim=768, device=None):
+    def __init__(self, feature_dim=512, hidden_dim=256, embedding_dim=768, device=None, use_part_features=False):
         self.feature_dim = feature_dim
         self.hidden_dim = hidden_dim
         self.embedding_dim = embedding_dim
+        self.use_part_features = use_part_features
         
         # Determine device
         if device is None:
@@ -128,6 +131,9 @@ class AssemblyEncoder:
         ).to(self.device)
         
         self.trained = False
+        
+        # Dictionary to cache part info for assemblies
+        self.assembly_parts_cache = {}
     
     def load_graph(self, graph_path):
         """
@@ -815,3 +821,266 @@ class AssemblyEncoder:
         except Exception as e:
             print(f"Error loading trained model: {e}")
             return False
+            
+    def get_assembly_parts(self, step_id, graph_data=None, graph_path=None, output_dir=None, bom_dir=None):
+        """
+        Get all part images for an assembly - primarily from images directory or BoM files
+        
+        Args:
+            step_id (str): STEP ID of the assembly
+            graph_data (dict, optional): Not used but kept for compatibility
+            graph_path (str, optional): Not used but kept for compatibility
+            output_dir (str, optional): Output directory to search for part images
+            bom_dir (str, optional): Directory containing BoM files
+            
+        Returns:
+            part_info (dict): Dictionary of parts info {part_id: {"name": part_name, "image_path": path}}
+        """
+        # Check if we already have this information cached
+        if step_id in self.assembly_parts_cache:
+            return self.assembly_parts_cache[step_id]
+            
+        # Get parts information
+        parts_info = {}
+        
+        # First try to get parts from images directory based on naming patterns
+        if output_dir:
+            image_parts = self.find_parts_in_output_dir(step_id, output_dir)
+            if image_parts:
+                # Convert the format to match our expected output
+                for part_name, image_path in image_parts.items():
+                    part_id = f"{part_name}_{len(parts_info)}"
+                    parts_info[part_id] = {
+                        "name": part_name,
+                        "image_path": image_path
+                    }
+                print(f"Found {len(parts_info)} parts for assembly {step_id} from image naming patterns")
+                
+        # If we couldn't find parts from images or not enough were found, try BoM files
+        if len(parts_info) == 0 and bom_dir:
+            bom_parts = self.extract_parts_from_bom(step_id, bom_dir, output_dir)
+            if bom_parts:
+                # Merge with existing parts
+                parts_info.update(bom_parts)
+                print(f"Found {len(bom_parts)} parts for assembly {step_id} from BoM file")
+        
+        # Store in cache for future use
+        self.assembly_parts_cache[step_id] = parts_info
+        
+        # If no parts were found with either method, print a message
+        if len(parts_info) == 0:
+            print(f"No parts found for assembly {step_id} from images or BoM files")
+            
+        return parts_info
+        
+    def _extract_parts_from_graphml(self, graph_path, output_dir=None):
+        """
+        Extract part information from a GraphML file
+        
+        Args:
+            graph_path (str): Path to the GraphML file
+            output_dir (str, optional): Output directory to search for part images
+            
+        Returns:
+            part_info (dict): Dictionary of parts info {part_id: {"name": part_name, "image_path": path}}
+        """
+        try:
+            import xml.etree.ElementTree as ET
+            
+            parts_info = {}
+            
+            # Try to get the STEP ID from the file name
+            step_id = self.extract_step_id(graph_path)
+            
+            # Parse GraphML file
+            tree = ET.parse(graph_path)
+            root = tree.getroot()
+            
+            # Find namespace if any
+            ns = root.tag.split('}')[0] + '}' if '}' in root.tag else ''
+            
+            # Find part nodes
+            part_nodes = []
+            for node in root.findall('.//' + ns + 'node'):
+                # Check if this is a part node
+                is_part = False
+                part_name = None
+                part_id = node.get('id')
+                
+                for data in node.findall('.//' + ns + 'data'):
+                    key = data.get('key')
+                    if key == 'type' and data.text and data.text.lower() == 'part':
+                        is_part = True
+                    if key == 'name' or key == 'part_name':
+                        part_name = data.text
+                        
+                if is_part and part_name:
+                    part_nodes.append((part_id, part_name))
+            
+            # If output_dir is provided, search for matching part images
+            if output_dir and os.path.exists(output_dir):
+                images_dir = os.path.join(output_dir, "images")
+                if os.path.exists(images_dir):
+                    # Create regex pattern for part images
+                    # Format is typically step_id_part_name.png
+                    for part_id, part_name in part_nodes:
+                        # Clean part name for matching
+                        clean_name = re.sub(r'[^\w]', '_', part_name.lower())
+                        pattern = f"{step_id}_.*{clean_name}.*\.png"
+                        
+                        # Search for matching files
+                        for root, _, files in os.walk(images_dir):
+                            for file in files:
+                                if re.match(pattern, file, re.IGNORECASE) or step_id in file and clean_name in file.lower():
+                                    parts_info[part_id] = {
+                                        "name": part_name,
+                                        "image_path": os.path.join(root, file)
+                                    }
+                                    break
+                
+            # If we couldn't find images for some parts, add them without image paths
+            for part_id, part_name in part_nodes:
+                if part_id not in parts_info:
+                    parts_info[part_id] = {
+                        "name": part_name,
+                        "image_path": None
+                    }
+            
+            return parts_info
+            
+        except Exception as e:
+            print(f"Error extracting parts from GraphML file {graph_path}: {e}")
+            import traceback
+            traceback.print_exc()
+            return {}
+            
+    def extract_parts_from_bom(self, step_id, bom_dir, output_dir=None):
+        """
+        Extract part information from a BoM file
+        
+        Args:
+            step_id (str): STEP ID of the assembly
+            bom_dir (str): Directory containing BoM files
+            output_dir (str, optional): Output directory to search for part images
+            
+        Returns:
+            part_info (dict): Dictionary of parts info {part_id: {"name": part_name, "image_path": path}}
+        """
+        try:
+            parts_info = {}
+            
+            # Construct BOM path
+            bom_path = os.path.join(bom_dir, f"{step_id}_bom.json")
+            
+            if not os.path.exists(bom_path):
+                print(f"BoM file not found for assembly {step_id}: {bom_path}")
+                return {}
+                
+            # Load the BoM file
+            with open(bom_path, 'r') as f:
+                bom_data = json.load(f)
+                
+            if not bom_data or not isinstance(bom_data, dict):
+                print(f"Invalid BoM data format for assembly {step_id}")
+                return {}
+                
+            # Find all part names in the BoM
+            part_names = []
+            
+            # Check for different BoM structures
+            if "parts" in bom_data and isinstance(bom_data["parts"], list):
+                # Structure with a "parts" list
+                for part in bom_data["parts"]:
+                    if isinstance(part, dict) and "name" in part:
+                        part_names.append(part["name"])
+            else:
+                # Structure where each key is a part name
+                for key, value in bom_data.items():
+                    if isinstance(value, dict) and ("properties" in value or "type" in value):
+                        part_names.append(key)
+                    elif isinstance(value, dict) and "name" in value:
+                        part_names.append(value["name"])
+            
+            # Now for each part name, try to find a matching image
+            if output_dir and os.path.exists(output_dir):
+                images_dir = os.path.join(output_dir, "images")
+                if os.path.exists(images_dir):
+                    # Look for all part images in the directory
+                    all_images = {}
+                    for root, _, files in os.walk(images_dir):
+                        for file in files:
+                            if file.endswith(".png") and step_id in file:
+                                all_images[file] = os.path.join(root, file)
+                    
+                    # For each part name, try to find a matching image
+                    for part_name in part_names:
+                        # Clean the part name for matching
+                        clean_name = re.sub(r'[^\w]', '_', part_name.lower())
+                        
+                        # Try different matching patterns
+                        matched_image = None
+                        for file, path in all_images.items():
+                            # Try exact match with pattern
+                            if f"{step_id}_{clean_name}.png" == file.lower():
+                                matched_image = path
+                                break
+                                
+                            # Try partial match
+                            if step_id in file and clean_name in file.lower():
+                                matched_image = path
+                                break
+                        
+                        # Add to parts info if we found an image
+                        if matched_image:
+                            part_id = f"{part_name}_{len(parts_info)}"
+                            parts_info[part_id] = {
+                                "name": part_name,
+                                "image_path": matched_image
+                            }
+                        else:
+                            # Add without image path
+                            part_id = f"{part_name}_{len(parts_info)}"
+                            parts_info[part_id] = {
+                                "name": part_name,
+                                "image_path": None
+                            }
+            
+            return parts_info
+            
+        except Exception as e:
+            print(f"Error extracting parts from BoM file for assembly {step_id}: {e}")
+            import traceback
+            traceback.print_exc()
+            return {}
+            
+    def find_parts_in_output_dir(self, step_id, output_dir):
+        """
+        Find all part images for a given STEP ID in the output directory
+        
+        Args:
+            step_id (str): STEP ID to search for
+            output_dir (str): Output directory to search in
+            
+        Returns:
+            part_images (dict): Dictionary mapping part names to image paths
+        """
+        if not output_dir or not os.path.exists(output_dir):
+            return {}
+            
+        part_images = {}
+        images_dir = os.path.join(output_dir, "images")
+        
+        if not os.path.exists(images_dir):
+            return {}
+            
+        # Look for images with the step_id prefix
+        pattern = f"{step_id}_.*\.png"
+        
+        for root, _, files in os.walk(images_dir):
+            for file in files:
+                if file.startswith(f"{step_id}_") and file.endswith(".png"):
+                    # Extract part name from filename (remove step_id_ prefix and .png suffix)
+                    part_name = file[len(step_id)+1:-4]
+                    part_images[part_name] = os.path.join(root, file)
+        
+        return part_images

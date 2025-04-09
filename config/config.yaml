@@ -59,3 +59,11 @@ assembly:
   batch_size: 8  # Smaller batch size due to graph complexity
   epochs: 5
   learning_rate: 0.0001
+  
+  # Assembly fusion settings
+  fusion:
+    enabled: true  # Enable fusion approach for assembly retrieval
+    method: "concat"  # Fusion method: "weighted", "concat", "mlp"
+    graph_weight: 0.2  # Weight for graph features in weighted fusion
+    part_weight: 0.8   # Weight for part features in weighted fusion
+    part_aggregation: "weighted"  # Method to aggregate part features: "mean", "max", "weighted"

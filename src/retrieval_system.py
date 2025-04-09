@@ -27,6 +27,7 @@ except ImportError as e:
 # Import assembly components
 try:
     from .assembly_encoder import AssemblyEncoder
+    from .assembly_fusion_module import AssemblyFusionModule
     ASSEMBLY_AVAILABLE = True
     print("Successfully imported assembly components")
 except ImportError as e:
@@ -111,6 +112,7 @@ class RetrievalSystem:
         self.use_assembly = self.config.get("assembly", {}).get("enabled", False)
         self.assembly_encoder = None
         self.assembly_db = None
+        self.assembly_fusion = None
 
         if ASSEMBLY_AVAILABLE and self.use_assembly:
             self.init_assembly_components()
@@ -142,12 +144,20 @@ class RetrievalSystem:
             graph_dir = self.config.get("assembly", {}).get("graph_dir", "data/output/hierarchical_graphs")
             os.makedirs(graph_dir, exist_ok=True)
 
-            # Initialize assembly encoder
+            # Get fusion settings
+            fusion_enabled = self.config.get("assembly", {}).get("fusion", {}).get("enabled", True)
+            fusion_method = self.config.get("assembly", {}).get("fusion", {}).get("method", "weighted")
+            graph_weight = self.config.get("assembly", {}).get("fusion", {}).get("graph_weight", 0.6)
+            part_weight = self.config.get("assembly", {}).get("fusion", {}).get("part_weight", 0.4)
+            part_aggregation = self.config.get("assembly", {}).get("fusion", {}).get("part_aggregation", "mean")
+
+            # Initialize assembly encoder with part features flag if fusion is enabled
             self.assembly_encoder = AssemblyEncoder(
                 feature_dim=self.config.get("assembly", {}).get("feature_dim", 512),
                 hidden_dim=self.config.get("assembly", {}).get("hidden_dim", 256),
                 embedding_dim=self.config.get("assembly", {}).get("embedding_dim", 768),
-                device=next(self.image_encoder.model.parameters()).device.type if hasattr(self.image_encoder, 'model') else None
+                device=next(self.image_encoder.model.parameters()).device.type if hasattr(self.image_encoder, 'model') else None,
+                use_part_features=fusion_enabled
             )
             
             # Initialize assembly vector database (similar to part vector database)
@@ -162,9 +172,23 @@ class RetrievalSystem:
             if os.path.exists(model_path):
                 self.assembly_encoder.load_trained_model(model_path)
 
-            print(f"Assembly similarity enabled with GNN")
+            # Initialize assembly fusion module if enabled
+            if fusion_enabled:
+                self.assembly_fusion = AssemblyFusionModule(
+                    graph_dim=self.config.get("assembly", {}).get("embedding_dim", 768),
+                    part_feature_dim=self.config["model"]["embedding_dim"],
+                    output_dim=self.config.get("assembly", {}).get("embedding_dim", 768),
+                    fusion_method=fusion_method,
+                    graph_weight=graph_weight,
+                    part_weight=part_weight
+                )
+                print(f"Assembly similarity enabled with GNN and fusion (method: {fusion_method})")
+            else:
+                print(f"Assembly similarity enabled with GNN only")
         except Exception as e:
             print(f"Error initializing assembly components: {e}")
+            import traceback
+            traceback.print_exc()
             self.use_assembly = False
 
     def extract_part_info(self, image_path):
@@ -923,9 +947,109 @@ class RetrievalSystem:
                 print(f"Failed to encode graph {graph_path}")
                 return None
             
+            # If fusion is enabled, combine with part-based features
+            if self.assembly_fusion is not None:
+                # Get the STEP ID
+                step_id = self.assembly_encoder.extract_step_id(graph_path)
+                
+                # Get part-based features
+                part_features = self._get_part_features_for_assembly(step_id, graph_data, graph_path)
+                
+                # If we have valid part features, fuse them with graph features
+                if part_features is not None:
+                    embedding = self.assembly_fusion.fuse(embedding, part_features)
+            
             return embedding
         except Exception as e:
             print(f"Error getting embedding from graph {graph_path}: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+            
+    def _get_part_features_for_assembly(self, step_id, graph_data=None, graph_path=None):
+        """
+        Get part-based features for an assembly
+        
+        Args:
+            step_id (str): STEP ID of the assembly
+            graph_data (dict, optional): Graph data if already loaded
+            graph_path (str, optional): Path to the graph file if graph_data not provided
+            
+        Returns:
+            part_features (torch.Tensor): Aggregated part features
+        """
+        try:
+            # Get output directory for finding part images
+            output_dir = self.config["data"]["output_dir"]
+            
+            # Get BOM directory for metadata
+            bom_dir = self.config.get("metadata", {}).get("bom_dir")
+            
+            # Get parts information from the assembly using images and BoM files
+            parts_info = self.assembly_encoder.get_assembly_parts(step_id, graph_data, graph_path, output_dir, bom_dir)
+            
+            if not parts_info:
+                print(f"No parts found for assembly {step_id} from images or BoM files")
+                return None
+            
+            # Get features for each part
+            part_embeddings = []
+            part_metadata_embeddings = []
+            
+            for part_id, info in parts_info.items():
+                image_path = info.get("image_path")
+                part_name = info.get("name")
+                
+                if image_path and os.path.exists(image_path):
+                    # Extract visual features
+                    visual_embedding = self.image_encoder.encode_image(image_path)
+                    
+                    # Try to get metadata features if available
+                    metadata_embedding = None
+                    if self.use_metadata and self.metadata_encoder and part_name and bom_dir:
+                        # Construct BOM path
+                        bom_path = os.path.join(bom_dir, f"{step_id}_bom.json")
+                        
+                        if os.path.exists(bom_path):
+                            # Load BOM data
+                            bom_data = self.metadata_encoder.load_bom_data(bom_path)
+                            
+                            # Find metadata for this part
+                            part_metadata = self.metadata_encoder.find_part_metadata(bom_data, part_name)
+                            
+                            if part_metadata:
+                                # Encode metadata
+                                metadata_embedding = self.metadata_encoder.encode_metadata(part_metadata)
+                    
+                    # If we have both visual and metadata features, fuse them at part level
+                    if self.use_metadata and self.fusion_module and metadata_embedding is not None:
+                        # Fuse part-level features
+                        part_embedding = self.fusion_module.fuse(visual_embedding, metadata_embedding)
+                    else:
+                        # Just use visual features
+                        part_embedding = visual_embedding
+                    
+                    # Add to the list
+                    part_embeddings.append(part_embedding)
+            
+            if not part_embeddings:
+                print(f"No valid part embeddings found for assembly {step_id} - no usable images")
+                return None
+            
+            # Combine part embeddings into a single tensor
+            part_embeddings_tensor = torch.cat(part_embeddings, dim=0)
+            
+            # Aggregate part features using the assembly fusion module
+            aggregation_method = self.config.get("assembly", {}).get("fusion", {}).get("part_aggregation", "mean")
+            aggregated_features = self.assembly_fusion.aggregate_part_features(part_embeddings_tensor, aggregation_method)
+            
+            print(f"Successfully aggregated features from {len(part_embeddings)} parts for assembly {step_id}")
+            return aggregated_features
+            
+        except Exception as e:
+            print(f"Error getting part features for assembly {step_id}: {e}")
+            import traceback
+            traceback.print_exc()
             return None
 
     def _rerank_by_size(self, results, query_metadata, size_weight=0.3):
@@ -1346,6 +1470,21 @@ class RetrievalSystem:
             output_path = os.path.join(results_dir, f"assembly_search_{query_step_id}.html")
         
         # Create an HTML visualization
+        # Determine if fusion is enabled
+        fusion_enabled = self.config.get("assembly", {}).get("fusion", {}).get("enabled", False)
+        fusion_method = self.config.get("assembly", {}).get("fusion", {}).get("method", "weighted")
+        
+        fusion_info = ""
+        if fusion_enabled and self.assembly_fusion is not None:
+            # Get fusion weights
+            graph_weight = self.config.get("assembly", {}).get("fusion", {}).get("graph_weight", 0.6)
+            part_weight = self.config.get("assembly", {}).get("fusion", {}).get("part_weight", 0.4)
+            part_aggregation = self.config.get("assembly", {}).get("fusion", {}).get("part_aggregation", "mean")
+            
+            fusion_info = f"<p>Using fusion approach: {fusion_method} (Graph: {graph_weight:.1f}, Parts: {part_weight:.1f}, Aggregation: {part_aggregation})</p>"
+        else:
+            fusion_info = "<p>Using graph-only approach (no fusion)</p>"
+        
         html_content = f"""
         <!DOCTYPE html>
         <html>
@@ -1366,11 +1505,16 @@ class RetrievalSystem:
                 .similarity-medium {{ background-color: #fff3cd; color: #856404; }}
                 .similarity-low {{ background-color: #f8d7da; color: #721c24; }}
                 .details {{ margin-top: 10px; }}
+                .info-box {{ background-color: #e9ecef; padding: 10px; border-radius: 5px; margin-bottom: 20px; }}
             </style>
         </head>
         <body>
             <h1>Assembly Search Results</h1>
             <h2>Query: {query_step_id}</h2>
+            
+            <div class="info-box">
+                {fusion_info}
+            </div>
             
             <div class="results">
         """
@@ -1759,6 +1903,11 @@ class RetrievalSystem:
             if hasattr(self, 'assembly_db') and self.assembly_db:
                 assembly_index_stats = self.assembly_db.get_stats()
             
+            # Get fusion info
+            fusion_enabled = self.config.get("assembly", {}).get("fusion", {}).get("enabled", False)
+            fusion_method = self.config.get("assembly", {}).get("fusion", {}).get("method", "weighted")
+            part_aggregation = self.config.get("assembly", {}).get("fusion", {}).get("part_aggregation", "mean")
+            
             assembly_info.update({
                 "feature_dim": self.config.get("assembly", {}).get("feature_dim"),
                 "hidden_dim": self.config.get("assembly", {}).get("hidden_dim"),
@@ -1766,7 +1915,14 @@ class RetrievalSystem:
                 "graph_dir": self.config.get("assembly", {}).get("graph_dir"),
                 "gnn_trained": gnn_trained,
                 "gnn_model_path": self.config.get("assembly", {}).get("model_path"),
-                "index_stats": assembly_index_stats
+                "index_stats": assembly_index_stats,
+                "fusion": {
+                    "enabled": fusion_enabled,
+                    "method": fusion_method,
+                    "part_aggregation": part_aggregation,
+                    "graph_weight": self.config.get("assembly", {}).get("fusion", {}).get("graph_weight", 0.6),
+                    "part_weight": self.config.get("assembly", {}).get("fusion", {}).get("part_weight", 0.4)
+                }
             })
 
         return {
