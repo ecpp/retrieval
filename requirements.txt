@@ -1,5 +1,6 @@
 torch>=2.0.0
 torchvision>=0.15.0
+torch_geometric==2.6.1
 transformers>=4.30.0
 faiss-cpu>=1.7.4
 pillow>=9.5.0
