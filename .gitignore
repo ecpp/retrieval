@@ -2,6 +2,7 @@
 dataset/
 hundreddata/
 data/
+output/
 sample/
 saved_models/
 embedding_cache/

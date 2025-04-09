@@ -2,6 +2,7 @@ import os
 import yaml
 import json
 import torch
+import shutil
 from PIL import Image
 import matplotlib.pyplot as plt
 from tqdm import tqdm
@@ -13,7 +14,7 @@ from .rotational_utils import rotation_invariant_search
 import math
 import numpy as np
 
-# Import new components for Phase 2
+# Import metadata components
 try:
     from .metadata_encoder import MetadataEncoder
     from .fusion_module import FusionModule
@@ -22,6 +23,15 @@ try:
 except ImportError as e:
     METADATA_AVAILABLE = False
     print(f"ImportError: Could not import metadata components: {e}")
+
+# Import assembly components
+try:
+    from .assembly_encoder import AssemblyEncoder
+    ASSEMBLY_AVAILABLE = True
+    print("Successfully imported assembly components")
+except ImportError as e:
+    ASSEMBLY_AVAILABLE = False
+    print(f"ImportError: Could not import assembly components: {e}")
 
 # Check if rotation utilities are available
 ROTATION_AVAILABLE = True  # Since we successfully imported rotation_invariant_search
@@ -72,7 +82,6 @@ class RetrievalSystem:
             bom_dir = self.config.get("metadata", {}).get("bom_dir", "data/output/bom")
             os.makedirs(bom_dir, exist_ok=True)
 
-            # Initialize metadata encoder
             # Initialize metadata encoder with autoencoder architecture
             self.metadata_encoder = MetadataEncoder(
                 output_dim=self.config.get("metadata", {}).get("embedding_dim", 256),
@@ -98,6 +107,18 @@ class RetrievalSystem:
                 print("Metadata components not available - reverting to visual-only search")
             self.use_metadata = False
 
+        # Initialize assembly components
+        self.use_assembly = self.config.get("assembly", {}).get("enabled", False)
+        self.assembly_encoder = None
+        self.assembly_db = None
+
+        if ASSEMBLY_AVAILABLE and self.use_assembly:
+            self.init_assembly_components()
+        else:
+            if not ASSEMBLY_AVAILABLE:
+                print("Assembly components not available")
+            self.use_assembly = False
+
         # Initialize data processor
         self.data_processor = DataProcessor(
             output_dir=self.config["data"]["output_dir"]
@@ -111,6 +132,40 @@ class RetrievalSystem:
         )
 
         print(f"Retrieval system initialized with {self.config['model']['name']} encoder")
+
+    def init_assembly_components(self):
+        """
+        Initialize assembly search components
+        """
+        try:
+            # Create assembly directory
+            graph_dir = self.config.get("assembly", {}).get("graph_dir", "data/output/hierarchical_graphs")
+            os.makedirs(graph_dir, exist_ok=True)
+
+            # Initialize assembly encoder
+            self.assembly_encoder = AssemblyEncoder(
+                feature_dim=self.config.get("assembly", {}).get("feature_dim", 512),
+                hidden_dim=self.config.get("assembly", {}).get("hidden_dim", 256),
+                embedding_dim=self.config.get("assembly", {}).get("embedding_dim", 768),
+                device=next(self.image_encoder.model.parameters()).device.type if hasattr(self.image_encoder, 'model') else None
+            )
+            
+            # Initialize assembly vector database (similar to part vector database)
+            self.assembly_db = VectorDatabase(
+                embedding_dim=self.config.get("assembly", {}).get("embedding_dim", 768),
+                index_file=self.config.get("assembly", {}).get("index_file", "models/assembly_index.bin"),
+                metadata_file=self.config.get("assembly", {}).get("metadata_file", "models/assembly_metadata.pkl")
+            )
+
+            # Try to load pre-trained model if it exists
+            model_path = self.config.get("assembly", {}).get("model_path", "models/assembly_gnn.pt")
+            if os.path.exists(model_path):
+                self.assembly_encoder.load_trained_model(model_path)
+
+            print(f"Assembly similarity enabled with GNN")
+        except Exception as e:
+            print(f"Error initializing assembly components: {e}")
+            self.use_assembly = False
 
     def extract_part_info(self, image_path):
         """
@@ -193,13 +248,129 @@ class RetrievalSystem:
                             print(f"Error copying BOM file {file}: {e}")
 
             print(f"Copied {bom_files_copied} BOM files to {bom_dir}")
-
-            # Note: Autoencoder training is now a separate process and not automatically done during ingestion
-            print(f"Copied {bom_files_copied} BOM files to {bom_dir}")
             print("To train the autoencoder, use the 'train-autoencoder' command")
+
+        # Copy hierarchical graph files if assembly is enabled
+        if self.use_assembly:
+            graph_dir = self.config.get("assembly", {}).get("graph_dir", "data/output/hierarchical_graphs")
+            os.makedirs(graph_dir, exist_ok=True)
+            
+            # Copy graph files from the source to the graph directory
+            graph_files_copied = 0
+            
+            # Look for both JSON and GraphML formats
+            for root, dirs, files in os.walk(dataset_dir):
+                for file in files:
+                    # Check for hierarchical graph files in different formats
+                    if file.endswith("_hierarchical.graphml"):
+                        
+                        src_path = os.path.join(root, file)
+                        dst_path = os.path.join(graph_dir, file)
+                        
+                        # Copy file
+                        try:
+                            # For GraphML files
+                            if file.endswith(".graphml"):
+                                # Direct file copy for binary formats
+                                shutil.copy2(src_path, dst_path)
+                            else:
+                                # For JSON, we can pretty-print
+                                with open(src_path, 'r') as src, open(dst_path, 'w') as dst:
+                                    graph_data = json.load(src)
+                                    json.dump(graph_data, dst, indent=2)
+                            
+                            graph_files_copied += 1
+                            print(f"Copied graph file: {file}")
+                        except Exception as e:
+                            print(f"Error copying graph file {file}: {e}")
+            
+            print(f"Copied {graph_files_copied} hierarchical graph files to {graph_dir}")
+            print("To build the assembly index, use the 'build-assembly' command")
 
         # Return the processed parts
         return all_parts
+
+    def ingest_assembly_data(self, dataset_dir):
+        """
+        Ingest hierarchical graph data from a directory of processed STEP files
+        
+        Args:
+            dataset_dir (str): Directory containing STEP output directories
+            
+        Returns:
+            all_assemblies (list): List of processed assembly information
+        """
+        if not self.use_assembly:
+            print("Assembly similarity is not enabled. Use --use-assembly flag or enable in config.")
+            return []
+        
+        graph_dir = self.config.get("assembly", {}).get("graph_dir", "data/output/hierarchical_graphs")
+        os.makedirs(graph_dir, exist_ok=True)
+        
+        print(f"Ingesting assembly graph data from {dataset_dir}")
+        print(f"Target directory: {graph_dir}")
+        
+        # Find and copy hierarchical graph files
+        all_assemblies = []
+        graph_files_copied = 0
+        
+        for root, dirs, files in os.walk(dataset_dir):
+            for file in files:
+                # Check for hierarchical graph files in different formats
+                if file.endswith("_hierarchical.graphml"):
+                    
+                    src_path = os.path.join(root, file)
+                    dst_path = os.path.join(graph_dir, file)
+                    
+                    # Extract assembly info
+                    step_id = self.assembly_encoder.extract_step_id(src_path)
+                    
+                    # Copy file
+                    try:
+                        # For GraphML files
+                        if file.endswith(".graphml"):
+                            # Direct file copy for binary formats
+                            shutil.copy2(src_path, dst_path)
+                            
+                            # Add to assemblies list without detailed info for GraphML
+                            all_assemblies.append({
+                                "step_id": step_id,
+                                "graph_path": dst_path,
+                                "format": "graphml"
+                            })
+                        else:
+                            # For JSON, we can process and pretty-print
+                            with open(src_path, 'r') as src:
+                                graph_data = json.load(src)
+                                
+                            with open(dst_path, 'w') as dst:
+                                json.dump(graph_data, dst, indent=2)
+                            
+                            # Add to assemblies list with detailed info for JSON
+                            all_assemblies.append({
+                                "step_id": step_id,
+                                "graph_path": dst_path,
+                                "num_nodes": len(graph_data.get("nodes", [])),
+                                "num_edges": len(graph_data.get("edges", [])),
+                                "format": "json"
+                            })
+                            
+                            print(f"Ingested assembly graph: {file} with {len(graph_data.get('nodes', []))} nodes")
+                        
+                        graph_files_copied += 1
+                    except Exception as e:
+                        print(f"Error copying graph file {file}: {e}")
+        
+        print(f"Copied {graph_files_copied} hierarchical graph files to {graph_dir}")
+        
+        # Save assembly information
+        assembly_info_path = os.path.join(self.config["data"]["output_dir"], "assembly_info.json")
+        with open(assembly_info_path, 'w') as f:
+            json.dump(all_assemblies, f, indent=2)
+        
+        print(f"Saved assembly info to {assembly_info_path}")
+        
+        return all_assemblies
 
     def build_index(self, image_dir=None):
         """
@@ -249,6 +420,90 @@ class RetrievalSystem:
         self.vector_db.save()
 
         return count
+
+    def build_assembly_index(self, graph_dir=None):
+        """
+        Build the vector index from hierarchical assembly graphs
+        
+        Args:
+            graph_dir (str): Directory containing hierarchical graph files
+            
+        Returns:
+            count (int): Number of assemblies indexed
+        """
+        if not self.use_assembly:
+            print("Assembly similarity is not enabled. Use --use-assembly flag or enable in config.")
+            return 0
+        
+        if graph_dir is None:
+            graph_dir = self.config.get("assembly", {}).get("graph_dir", "data/output/hierarchical_graphs")
+        
+        print(f"Building assembly index from {graph_dir}")
+        
+        # Check if assembly GNN model is trained/loaded
+        model_path = self.config.get("assembly", {}).get("model_path", "models/assembly_gnn.pt")
+        
+        # If model doesn't exist, use untrained model
+        if not os.path.exists(model_path):
+            print(f"Warning: Pre-trained assembly GNN model not found at {model_path}")
+            print("Using untrained model for encoding - results may not be optimal")
+        
+        # Collect all graph paths
+        graph_paths = []
+        for root, _, files in os.walk(graph_dir):
+            for file in files:
+                if file.endswith("_hierarchical.graphml"):
+                    full_path = os.path.join(root, file)
+                    graph_paths.append(full_path)
+        
+        if not graph_paths:
+            print(f"No graph files found in {graph_dir} [Retrieval]")
+            return 0
+        
+        print(f"Found {len(graph_paths)} hierarchical graphs, generating embeddings...")
+        
+        # Process graphs in batches
+        batch_size = self.config["training"]["batch_size"]
+        
+        # Build metadata information for assemblies
+        assembly_metadata = {}
+        
+        for i in tqdm(range(0, len(graph_paths), batch_size)):
+            batch_paths = graph_paths[i:i+batch_size]
+            batch_embeddings = []
+            batch_metadata = []
+            
+            for path in batch_paths:
+                # Load and process the graph
+                graph_data = self.assembly_encoder.load_graph(path)
+                
+                if graph_data:
+                    # Encode the graph
+                    embedding = self.assembly_encoder.encode_graph(graph_data)
+                    
+                    if embedding is not None:
+                        # Extract assembly information
+                        step_id = self.assembly_encoder.extract_step_id(path)
+                        
+                        # Add to batch
+                        batch_embeddings.append(embedding)
+                        batch_metadata.append({
+                            "step_id": step_id,
+                            "graph_path": path,
+                            "num_nodes": graph_data["num_nodes"]
+                        })
+            
+            # Add embeddings to the assembly index
+            if batch_embeddings:
+                # Convert list of tensors to single tensor
+                embeddings_tensor = torch.cat(batch_embeddings, dim=0)
+                self.assembly_db.add_embeddings(embeddings_tensor, batch_paths, batch_metadata)
+        
+        # Save the assembly index
+        self.assembly_db.save()
+        
+        print(f"Added {len(graph_paths)} assemblies to the index")
+        return len(graph_paths)
 
     def _build_index_with_metadata(self, image_dir):
         """
@@ -530,6 +785,148 @@ class RetrievalSystem:
             import traceback
             traceback.print_exc()
             return {"paths": [], "distances": [], "similarities": []}
+
+    def retrieve_similar_assemblies(self, query, k=10):
+        """
+        Retrieve similar assemblies to a query STEP file
+        
+        Args:
+            query (str): STEP ID, graph file path, or part name
+            k (int): Number of results to retrieve
+            
+        Returns:
+            results (dict): Search results
+        """
+        if not self.use_assembly:
+            print("Assembly similarity is not enabled. Use --use-assembly flag or enable in config.")
+            return {"paths": [], "distances": [], "similarities": []}
+        
+        print(f"\n--- Beginning Assembly Retrieval Process ---")
+        print(f"Query: {query}")
+        
+        # Determine query type and get query embedding
+        if os.path.exists(query) and query.endswith("_hierarchical.graphml"):
+            # It's a path to a graph file
+            query_graph_path = query
+            query_step_id = self.assembly_encoder.extract_step_id(query)
+            print(f"Query is a graph file path. STEP ID: {query_step_id}")
+            
+            # Load and encode the query graph
+            query_embedding = self._get_embedding_from_graph(query_graph_path)
+        elif os.path.exists(query) and (query.endswith('.png') or query.endswith('.jpg')):
+            # It's a part image, find its assembly
+            print(f"Query is a part image. Extracting assembly information...")
+            part_info = self.extract_part_info(query)
+            print(f"Part info: {part_info}")
+            
+            if not part_info or "parent_step" not in part_info:
+                print("Could not extract parent STEP from part image")
+                return {"paths": [], "distances": [], "similarities": []}
+            
+            query_step_id = part_info["parent_step"]
+            print(f"Found parent STEP ID: {query_step_id}")
+            
+            # Find graph file
+            graph_dir = self.config.get("assembly", {}).get("graph_dir", "data/output/hierarchical_graphs")
+            possible_graph_paths = [
+                os.path.join(graph_dir, f"{query_step_id}_graph.json"),
+                os.path.join(graph_dir, f"{query_step_id}_hierarchical_graph.json"),
+                os.path.join(graph_dir, f"{query_step_id}_hierarchical.graphml"),
+                os.path.join(graph_dir, f"{query_step_id}_graph.graphml")
+            ]
+            
+            query_graph_path = None
+            for path in possible_graph_paths:
+                if os.path.exists(path):
+                    query_graph_path = path
+                    break
+            
+            if not query_graph_path:
+                print(f"Could not find graph file for STEP ID: {query_step_id}")
+                return {"paths": [], "distances": [], "similarities": []}
+            
+            # Load and encode the query graph
+            query_embedding = self._get_embedding_from_graph(query_graph_path)
+        else:
+            # Assume it's a STEP ID
+            query_step_id = query
+            print(f"Assuming query is a STEP ID: {query_step_id}")
+            
+            # Find graph file
+            graph_dir = self.config.get("assembly", {}).get("graph_dir", "data/output/hierarchical_graphs")
+            possible_graph_paths = [os.path.join(graph_dir, f"{query_step_id}_hierarchical.graphml")]
+            
+            query_graph_path = None
+            for path in possible_graph_paths:
+                if os.path.exists(path):
+                    query_graph_path = path
+                    break
+            
+            if not query_graph_path:
+                print(f"Could not find graph file for STEP ID: {query_step_id}")
+                return {"paths": [], "distances": [], "similarities": []}
+            
+            # Load and encode the query graph
+            query_embedding = self._get_embedding_from_graph(query_graph_path)
+        
+        # Check if we have a valid embedding
+        if query_embedding is None:
+            print("Failed to generate query embedding")
+            return {"paths": [], "distances": [], "similarities": []}
+        
+        # Search the assembly database
+        print(f"Searching assembly database for {k} nearest neighbors...")
+        results = self.assembly_db.search(query_embedding, k=k)
+        
+        # Calculate similarities from distances
+        similarities = [100 * (1 / (1 + d)) for d in results["distances"]]
+        results["similarities"] = similarities
+        
+        # Add assembly info to results
+        assembly_info = []
+        for path in results["paths"]:
+            step_id = self.assembly_encoder.extract_step_id(path)
+            assembly_info.append({
+                "step_id": step_id,
+                "graph_path": path
+            })
+        
+        results["assembly_info"] = assembly_info
+        results["query_step_id"] = query_step_id
+        results["query_graph_path"] = query_graph_path
+        
+        print(f"--- Assembly Retrieval Process Complete ---\n")
+        return results
+
+    def _get_embedding_from_graph(self, graph_path):
+        """
+        Get embedding from graph file
+        
+        Args:
+            graph_path (str): Path to graph file
+            
+        Returns:
+            embedding (torch.Tensor): Graph embedding
+        """
+        try:
+            # Load and process the graph
+            graph_data = self.assembly_encoder.load_graph(graph_path)
+            
+            if not graph_data:
+                print(f"Could not load graph data from {graph_path}")
+                return None
+            
+            # Encode the graph
+            embedding = self.assembly_encoder.encode_graph(graph_data)
+            
+            if embedding is None:
+                print(f"Failed to encode graph {graph_path}")
+                return None
+            
+            return embedding
+        except Exception as e:
+            print(f"Error getting embedding from graph {graph_path}: {e}")
+            return None
 
     def _rerank_by_size(self, results, query_metadata, size_weight=0.3):
         """
@@ -918,6 +1315,113 @@ class RetrievalSystem:
             print(f"Error visualizing results: {e}")
             return None
 
+    def visualize_assembly_results(self, query, results, output_path=None):
+        """
+        Visualize assembly retrieval results
+        
+        Args:
+            query (str): Query STEP ID or graph file path
+            results (dict): Search results from retrieve_similar_assemblies
+            output_path (str): Optional path to save the visualization
+            
+        Returns:
+            output_path (str): Path to the saved visualization
+        """
+        if not self.use_assembly:
+            print("Assembly similarity is not enabled.")
+            return None
+        
+        # Get query STEP ID
+        if "query_step_id" in results:
+            query_step_id = results["query_step_id"]
+        elif os.path.exists(query) and query.endswith("_hierarchical.graphml"):
+            query_step_id = self.assembly_encoder.extract_step_id(query)
+        else:
+            query_step_id = query
+        
+        # Create default output path if none provided
+        if output_path is None:
+            results_dir = os.path.join(self.config["data"]["output_dir"], "results", "assembly_searches")
+            os.makedirs(results_dir, exist_ok=True)
+            output_path = os.path.join(results_dir, f"assembly_search_{query_step_id}.html")
+        
+        # Create an HTML visualization
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Assembly Search Results for {query_step_id}</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 20px; }}
+                .results {{ display: flex; flex-direction: column; }}
+                .result {{ margin: 10px; padding: 15px; border: 1px solid #ccc; border-radius: 5px; }}
+                .result-header {{ display: flex; justify-content: space-between; }}
+                .step-id {{ font-weight: bold; font-size: 18px; }}
+                .similarity {{ 
+                    padding: 5px 10px;
+                    border-radius: 10px;
+                    font-weight: bold;
+                }}
+                .similarity-high {{ background-color: #d4edda; color: #155724; }}
+                .similarity-medium {{ background-color: #fff3cd; color: #856404; }}
+                .similarity-low {{ background-color: #f8d7da; color: #721c24; }}
+                .details {{ margin-top: 10px; }}
+            </style>
+        </head>
+        <body>
+            <h1>Assembly Search Results</h1>
+            <h2>Query: {query_step_id}</h2>
+            
+            <div class="results">
+        """
+        
+        # Add results
+        for i, (path, info, similarity) in enumerate(zip(
+                results["paths"],
+                results.get("assembly_info", [None] * len(results["paths"])),
+                results.get("similarities", [None] * len(results["paths"]))
+            )):
+            
+            # Get assembly info
+            step_id = info["step_id"] if info and "step_id" in info else "unknown"
+            
+            # Format similarity score and determine class
+            similarity_str = f"{similarity:.1f}%" if similarity is not None else "N/A"
+            if similarity >= 70:
+                similarity_class = "similarity-high"
+            elif similarity >= 50:
+                similarity_class = "similarity-medium"
+            else:
+                similarity_class = "similarity-low"
+            
+            # Add this result to the HTML
+            html_content += f"""
+                <div class="result">
+                    <div class="result-header">
+                        <div class="step-id">#{i+1}: STEP ID: {step_id}</div>
+                        <div class="similarity {similarity_class}">Similarity: {similarity_str}</div>
+                    </div>
+                    <div class="details">
+                        <p>Graph file: {os.path.basename(path)}</p>
+                        <p>Nodes: {info.get("num_nodes", "unknown")}</p>
+                    </div>
+                </div>
+            """
+        
+        # Close HTML
+        html_content += """
+            </div>
+        </body>
+        </html>
+        """
+        
+        # Write to file
+        with open(output_path, 'w') as f:
+            f.write(html_content)
+        
+        print(f"Assembly visualization saved to {output_path}")
+        return output_path
+
     def evaluate(self, query_dir=None, ground_truth=None):
         """
         Evaluate the retrieval system
@@ -976,16 +1480,7 @@ class RetrievalSystem:
         # Use configured threshold if none provided
         if threshold is None:
             threshold = self.config.get("text_search", {}).get("default_threshold", 0.7)
-        """
-        Find a part by name and return its image path
-
-        Args:
-            part_name (str): Name of the part to search for
-            threshold (float): Minimum similarity score (0-1) for matching
-
-        Returns:
-            best_match (dict): Dictionary with image path and similarity score of the best match
-        """
+        
         if not part_name or not self.vector_db.metadata or "part_info" not in self.vector_db.metadata:
             print(f"No part metadata available to search for '{part_name}'")
             return None
@@ -1026,6 +1521,61 @@ class RetrievalSystem:
         # Only return matches above the threshold
         if best_match and best_score >= threshold:
             print(f"Best match: '{best_match['part_name']}' with {best_match['similarity']:.2f} similarity")
+            return best_match
+        else:
+            print(f"No matches found above threshold {threshold}")
+            return None
+
+    def find_step_by_name(self, step_name, threshold=None):
+        """
+        Find a STEP file by name
+        
+        Args:
+            step_name (str): Name of the STEP file to search for
+            threshold (float): Minimum similarity score (0-1) for matching
+            
+        Returns:
+            best_match (dict): Dictionary with STEP information of the best match
+        """
+        if not self.use_assembly or not self.assembly_db or not hasattr(self.assembly_db, 'metadata'):
+            print(f"No assembly database available to search for '{step_name}'")
+            return None
+        
+        # Use configured threshold if none provided
+        if threshold is None:
+            threshold = self.config.get("text_search", {}).get("default_threshold", 0.7)
+        
+        print(f"Searching for STEP file matching name: '{step_name}'")
+        best_match = None
+        best_score = 0
+        
+        # Go through all assemblies in the index
+        for idx, metadata in enumerate(self.assembly_db.metadata.get("item_metadata", [])):
+            if not metadata or "step_id" not in metadata:
+                continue
+            
+            # Get the STEP name
+            current_step_id = metadata["step_id"]
+            
+            # Calculate similarity score using the same method as for parts
+            similarity = self._calculate_name_similarity(step_name, current_step_id)
+            
+            if similarity > best_score:
+                best_score = similarity
+                graph_path = self.assembly_db.metadata["id_to_path"].get(str(idx))
+                best_match = {
+                    "step_id": current_step_id,
+                    "graph_path": graph_path,
+                    "similarity": similarity
+                }
+                
+                # If we find an exact match, we can stop searching
+                if similarity >= 0.99:
+                    break
+        
+        # Only return matches above the threshold
+        if best_match and best_score >= threshold:
+            print(f"Best match: '{best_match['step_id']}' with {best_match['similarity']:.2f} similarity")
             return best_match
         else:
             print(f"No matches found above threshold {threshold}")
@@ -1194,10 +1744,35 @@ class RetrievalSystem:
                 "autoencoder_hidden_dims": self.config.get("metadata", {}).get("hidden_dims", [512, 384]),
                 "autoencoder_model_path": self.config.get("metadata", {}).get("model_path", "models/metadata_autoencoder.pt")
             })
+            
+        # Add assembly info if enabled
+        assembly_info = {
+            "enabled": hasattr(self, 'use_assembly') and self.use_assembly
+        }
+        
+        if hasattr(self, 'use_assembly') and self.use_assembly:
+            # Get assembly GNN info
+            gnn_trained = self.assembly_encoder.trained if hasattr(self.assembly_encoder, 'trained') else False
+            
+            # Add assembly index info if available
+            assembly_index_stats = {}
+            if hasattr(self, 'assembly_db') and self.assembly_db:
+                assembly_index_stats = self.assembly_db.get_stats()
+            
+            assembly_info.update({
+                "feature_dim": self.config.get("assembly", {}).get("feature_dim"),
+                "hidden_dim": self.config.get("assembly", {}).get("hidden_dim"),
+                "embedding_dim": self.config.get("assembly", {}).get("embedding_dim"),
+                "graph_dir": self.config.get("assembly", {}).get("graph_dir"),
+                "gnn_trained": gnn_trained,
+                "gnn_model_path": self.config.get("assembly", {}).get("model_path"),
+                "index_stats": assembly_index_stats
+            })
 
         return {
             "model": model_info,
             "index": index_stats,
             "configuration": self.config,
-            "metadata": metadata_info
+            "metadata": metadata_info,
+            "assembly": assembly_info
         }
