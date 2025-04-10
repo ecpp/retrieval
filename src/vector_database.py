@@ -54,22 +54,23 @@ class VectorDatabase:
         # Update metadata
         for i, path in enumerate(file_paths):
             idx = start_id + i
-            self.metadata["id_to_path"][idx] = path
+            self.metadata["id_to_path"][str(idx)] = path
             self.metadata["path_to_id"][path] = idx
 
             # Store additional metadata if provided
             if metadata and i < len(metadata):
                 if "part_info" not in self.metadata:
                     self.metadata["part_info"] = {}
-                self.metadata["part_info"][idx] = metadata[i]
+                self.metadata["part_info"][str(idx)] = metadata[i]
 
-    def search(self, query_embedding, k=10):
+    def search(self, query_embedding, k=10, metric="l2"):
         """
         Search for the k nearest neighbors of the query embedding
 
         Args:
             query_embedding (torch.Tensor or numpy.ndarray): Query embedding vector
             k (int): Number of nearest neighbors to return
+            metric (str): Distance metric to use ("l2" or "cosine")
 
         Returns:
             results (dict): Dictionary containing distances, similarities, and paths of nearest neighbors
@@ -81,24 +82,53 @@ class VectorDatabase:
         # Ensure the query is 2D
         if len(query_embedding.shape) == 1:
             query_embedding = query_embedding.reshape(1, -1)
+            
+        # Normalize query for cosine similarity if requested
+        if metric == "cosine":
+            # Normalize the query embedding for cosine similarity
+            query_norm = np.linalg.norm(query_embedding, axis=1, keepdims=True)
+            if query_norm[0, 0] > 0:  # Avoid division by zero
+                query_embedding = query_embedding / query_norm
 
-        # Perform the search
-        distances, indices = self.index.search(query_embedding.astype(np.float32), k)
+        # Make sure the index is using the right metric and is properly initialized
+        print(f"Index type: {type(self.index).__name__}, Total vectors: {self.index.ntotal}")
+        print(f"Query embedding shape: {query_embedding.shape}, dtype: {query_embedding.dtype}")
+        
+        # Ensure we're using the right data type and format
+        query_np = query_embedding.astype(np.float32)
+        
+        # Debug: Check if the index is empty
+        if self.index.ntotal == 0:
+            print("WARNING: Index is empty! No vectors to search.")
+            return {"distances": [], "indices": [], "paths": [], "part_info": [], "similarities": []}
+            
+        # Debug: Print a sample of the query vector
+        print(f"Query vector sample (first 5 elements): {query_np[0, :5]}")
+        
+        # Perform the search with proper error handling
+        try:
+            distances, indices = self.index.search(query_np, min(k, self.index.ntotal))
+            print(f"Search successful. Found {len(indices[0])} results.")
+        except Exception as e:
+            print(f"Error during search: {e}")
+            import traceback
+            traceback.print_exc()
+            return {"distances": [], "indices": [], "paths": [], "part_info": [], "similarities": []}
 
         # Get the file paths and part info
         paths = []
         part_info = []
 
         for idx in indices[0]:
-            idx = int(idx)
-            paths.append(self.metadata["id_to_path"].get(idx, None))
+            idx_str = str(int(idx))  # Convert to string for dictionary lookup
+            paths.append(self.metadata["id_to_path"].get(idx_str, None))
 
             # Get part info if available
-            if "part_info" in self.metadata and idx in self.metadata["part_info"]:
-                part_info.append(self.metadata["part_info"][idx])
+            if "part_info" in self.metadata and idx_str in self.metadata["part_info"]:
+                part_info.append(self.metadata["part_info"][idx_str])
             else:
                 # If no specific part info, extract basic info from the path
-                path = self.metadata["id_to_path"].get(idx, "")
+                path = self.metadata["id_to_path"].get(idx_str, "")
                 filename = os.path.basename(path)
                 # Try to extract step name and part name from filename
                 parts = os.path.splitext(filename)[0].split('_')
@@ -114,35 +144,19 @@ class VectorDatabase:
                     "part_name": part_name
                 })
 
-        # Calculate recalibrated similarity scores
         # Get the distances as list
         dist_list = distances[0].tolist()
-
-        # Use a better similarity calculation to ensure visually similar objects get high scores
-        similarities = []
-        for dist in dist_list:
-            # For very small distances (nearly identical items), give very high similarity
-            if dist < 0.05:
-                # Extremely close match gets 95-100%
-                similarity = 95 + (5 * (1 - dist / 0.05))
-            # For small distances (very similar items), still give high scores (85-95%)
-            elif dist < 0.3:
-                # Map 0.05-0.3 to 85-95%
-                similarity = 95 - 10 * ((dist - 0.05) / 0.25)
-            # For moderately small distances, give above average scores
-            elif dist < 1.0:
-                # Map 0.3-1.0 to 70-85%
-                similarity = 85 - 15 * ((dist - 0.3) / 0.7)
-            # For medium distances, scale gradually
-            elif dist < 3.0:
-                # Map 1.0-3.0 to 50-70%
-                similarity = 70 - 20 * ((dist - 1.0) / 2.0)
-            # For larger distances
-            else:
-                # Minimum 20%, decaying exponentially
-                similarity = max(20, 50 * math.exp(-0.25 * (dist - 3.0)))
-
-            similarities.append(min(similarity, 100.0))  # Cap at 100%
+        
+        # Just use raw distances without complex similarity calculations
+        # Add debug information about distances
+        print("\nRaw distances:")
+        for i, dist in enumerate(dist_list):
+            print(f"Result {i+1}: Distance = {dist:.4f}")
+            
+        # For compatibility, still provide a simple similarity value (0-1)
+        # where 1 is most similar (distance=0) and 0 is least similar (max distance)
+        max_dist = max(dist_list) if dist_list else 1.0
+        similarities = [1.0 - (d / (max_dist * 1.2)) for d in dist_list]  # 1.2 factor to avoid 0 similarity
 
         return {
             "distances": dist_list,
@@ -233,3 +247,12 @@ class VectorDatabase:
             "dimension": self.embedding_dim,
             "index_type": type(self.index).__name__,
         }
+        
+    def get_count(self):
+        """
+        Get the number of vectors in the index
+        
+        Returns:
+            count (int): Number of vectors in the index
+        """
+        return self.index.ntotal

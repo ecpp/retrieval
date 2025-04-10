@@ -326,17 +326,20 @@ def main():
             print(format_str.format("Rank", "STEP ID", "Graph File", "Similarity"))
             print("-" * 70)
             
-            for i, (path, info, similarity) in enumerate(zip(
+            for i, (path, similarity) in enumerate(zip(
                     results["paths"],
-                    results.get("assembly_info", [None] * len(results["paths"])),
                     results.get("similarities", [None] * len(results["paths"]))
                 )):
                 
-                # Get STEP ID
-                step_id = info["step_id"] if info and "step_id" in info else "unknown"
+                # Get STEP ID from path
+                if path:
+                    # Extract STEP ID directly from the path
+                    step_id = os.path.basename(path).split('_')[0] if '_' in os.path.basename(path) else "unknown"
+                else:
+                    step_id = "unknown"
                 
                 # Get graph filename
-                graph_filename = os.path.basename(path) if path else "N/A"
+                graph_filename = os.path.basename(path) if path else "unknown"
                 
                 # Format similarity
                 similarity_str = f"{similarity:.1f}%" if similarity is not None else "N/A"
@@ -352,7 +355,10 @@ def main():
             # Visualize if requested
             if args.visualize:
                 output_path = retrieval_system.visualize_assembly_results(query, results)
-                print(f"Visualization saved to: {output_path}")
+                if output_path:
+                    print(f"Visualization saved to: {output_path}")
+                else:
+                    print("Visualization could not be generated")
         else:
             print("No results found.")
 
@@ -404,17 +410,20 @@ def main():
                 print(format_str.format("Rank", "STEP ID", "Graph File", "Similarity"))
                 print("-" * 70)
                 
-                for i, (path, info, similarity) in enumerate(zip(
+                for i, (path, similarity) in enumerate(zip(
                         results["paths"],
-                        results.get("assembly_info", [None] * len(results["paths"])),
                         results.get("similarities", [None] * len(results["paths"]))
                     )):
                     
-                    # Get STEP ID
-                    step_id = info["step_id"] if info and "step_id" in info else "unknown"
+                    # Get STEP ID from path
+                    if path:
+                        # Extract STEP ID directly from the path
+                        step_id = os.path.basename(path).split('_')[0] if '_' in os.path.basename(path) else "unknown"
+                    else:
+                        step_id = "unknown"
                     
                     # Get graph filename
-                    graph_filename = os.path.basename(path) if path else "N/A"
+                    graph_filename = os.path.basename(path) if path else "unknown"
                     
                     # Format similarity
                     similarity_str = f"{similarity:.1f}%" if similarity is not None else "N/A"
@@ -430,7 +439,10 @@ def main():
                 # Visualize if requested
                 if args.visualize:
                     output_path = retrieval_system.visualize_assembly_results(query, results)
-                    print(f"Visualization saved to: {output_path}")
+                    if output_path:
+                        print(f"Visualization saved to: {output_path}")
+                    else:
+                        print("Visualization could not be generated")
             else:
                 print("No results found.")
                 

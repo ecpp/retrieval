@@ -12,6 +12,7 @@ data:
 indexing:
   index_file: "models/faiss_index.bin"
   metadata_file: "models/index_metadata.pkl"
+  force_rebuild: true  # Force rebuild of indices even if they already exist
 
 text_search:
   default_threshold: 0.7  # Default similarity threshold for text search (0-1)
@@ -46,7 +47,7 @@ metadata:
 
 # New section for assembly-level search
 assembly:
-  enabled: false  # Disabled by default, enable with --use-assembly flag
+  enabled: true  # Enable assembly retrieval
   feature_dim: 512  # Input feature dimension for GNN
   hidden_dim: 256   # Hidden layer dimension for GNN
   embedding_dim: 768  # Output embedding dimension (matching visual embeddings)
@@ -63,7 +64,7 @@ assembly:
   # Assembly fusion settings
   fusion:
     enabled: true  # Enable fusion approach for assembly retrieval
-    method: "concat"  # Fusion method: "weighted", "concat", "mlp"
-    graph_weight: 0.2  # Weight for graph features in weighted fusion
-    part_weight: 0.8   # Weight for part features in weighted fusion
-    part_aggregation: "weighted"  # Method to aggregate part features: "mean", "max", "weighted"
+    method: "weighted"  # Fusion method: "weighted", "concat", "mlp"
+    graph_weight: 1.0  # Weight for graph features in weighted fusion
+    part_weight: 0.0   # Weight for part features in weighted fusion
+    part_aggregation: "mean"  # Method to aggregate part features: "mean", "max", "weighted"

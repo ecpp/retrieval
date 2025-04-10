@@ -13,7 +13,6 @@ from .evaluator import RetrievalEvaluator
 from .rotational_utils import rotation_invariant_search
 import math
 import numpy as np
-import faiss
 
 # Import metadata components
 try:
@@ -463,39 +462,50 @@ class RetrievalSystem:
         if graph_dir is None:
             graph_dir = self.config.get("assembly", {}).get("graph_dir", "data/output/hierarchical_graphs")
         
-        # Check if we need to rebuild the index
+        # Check if index already exists and if fusion weights have changed
+        index_file = self.config.get("assembly", {}).get("index_file", "models/assembly_index.bin")
+        metadata_file = self.config.get("assembly", {}).get("metadata_file", "models/assembly_metadata.pkl")
+        
+        # Get current fusion weights
+        current_graph_weight = self.config.get("assembly", {}).get("fusion", {}).get("graph_weight", 0.5)
+        current_part_weight = self.config.get("assembly", {}).get("fusion", {}).get("part_weight", 0.5)
+        
+        # Store fusion weights in a metadata file to track changes
+        weights_file = os.path.join(os.path.dirname(index_file), "fusion_weights.json")
         rebuild_index = True
-        if os.path.exists(self.config["assembly"]["index_file"]) and os.path.exists(self.config["assembly"]["metadata_file"]):
-            # Check if we should force rebuild
-            rebuild_index = self.config.get("indexing", {}).get("force_rebuild", False)
-            
-            if not rebuild_index:
-                print(f"Using existing index with graph_weight={self.assembly_fusion.graph_weight:.2f}, part_weight={self.assembly_fusion.part_weight:.2f}")
-                return self.assembly_db.get_count()
-            else:
-                print(f"Force rebuilding index due to force_rebuild=true in config")
         
-        # Get fusion settings from config
-        graph_weight = self.config.get("assembly", {}).get("fusion", {}).get("graph_weight", 0.6)
-        part_weight = self.config.get("assembly", {}).get("fusion", {}).get("part_weight", 0.4)
+        if os.path.exists(weights_file):
+            try:
+                with open(weights_file, 'r') as f:
+                    weights = json.load(f)
+                previous_graph_weight = weights.get("graph_weight", 0.5)
+                previous_part_weight = weights.get("part_weight", 0.5)
+                
+                # Only rebuild if weights have changed
+                if (abs(previous_graph_weight - current_graph_weight) < 0.001 and 
+                    abs(previous_part_weight - current_part_weight) < 0.001 and
+                    os.path.exists(index_file) and os.path.exists(metadata_file)):
+                    print(f"Using existing index with graph_weight={current_graph_weight:.2f}, part_weight={current_part_weight:.2f}")
+                    rebuild_index = False
+                else:
+                    print(f"Fusion weights changed from graph={previous_graph_weight:.2f}/part={previous_part_weight:.2f} to graph={current_graph_weight:.2f}/part={current_part_weight:.2f}")
+                    print("Rebuilding assembly index with new weights...")
+            except:
+                print("Could not read previous weights, rebuilding index...")
         
-        # Store current weights for reference
-        current_graph_weight = self.assembly_fusion.graph_weight if self.assembly_fusion else graph_weight
-        current_part_weight = self.assembly_fusion.part_weight if self.assembly_fusion else part_weight
-        
-        # Save fusion settings to a JSON file for reference
-        with open(os.path.join(os.path.dirname(self.config["assembly"]["index_file"]), "assembly_fusion_settings.json"), "w") as f:
+        # Save current weights
+        os.makedirs(os.path.dirname(weights_file), exist_ok=True)
+        with open(weights_file, 'w') as f:
             json.dump({
                 "graph_weight": current_graph_weight,
                 "part_weight": current_part_weight
             }, f)
+            
+        if not rebuild_index:
+            return self.assembly_db.get_count()
         
         print("Building assembly vector index")
         print(f"Building assembly index from {graph_dir}")
-        
-        # Initialize a new empty index
-        self.assembly_db.index = faiss.IndexFlatL2(self.assembly_db.embedding_dim)
-        self.assembly_db.metadata = {"id_to_path": {}, "path_to_id": {}, "step_ids": {}}
         
         # Get all hierarchical graph files
         graph_files = []
@@ -533,40 +543,134 @@ class RetrievalSystem:
                         batch_embeddings.append(graph_embedding)
                         batch_metadata.append({
                             "step_id": step_id,
-                            "graph_path": path,
-                            "part_info": {
-                                "parent_step": step_id,
-                                "assembly_name": os.path.basename(path)
-                            }
+                            "graph_path": path
                         })
             
             # Add embeddings to the assembly index
             if batch_embeddings:
                 # Convert list of tensors to single tensor
                 embeddings_tensor = torch.cat(batch_embeddings, dim=0)
-                
-                # Ensure paths are properly stored in id_to_path mapping
                 self.assembly_db.add_embeddings(embeddings_tensor, batch_paths, batch_metadata)
-                
-                # Make sure the id_to_path mapping is properly populated
-                start_id = self.assembly_db.index.ntotal - len(batch_paths)
-                for j, (path, metadata) in enumerate(zip(batch_paths, batch_metadata)):
-                    idx = start_id + j
-                    idx_str = str(idx)
-                    if 'id_to_path' not in self.assembly_db.metadata:
-                        self.assembly_db.metadata['id_to_path'] = {}
-                    self.assembly_db.metadata['id_to_path'][idx_str] = path
-                    
-                    # Store STEP ID in metadata for easy access
-                    if 'step_ids' not in self.assembly_db.metadata:
-                        self.assembly_db.metadata['step_ids'] = {}
-                    self.assembly_db.metadata['step_ids'][idx_str] = metadata['step_id']
         
         # Save the assembly index
         self.assembly_db.save()
         
         print(f"Added {len(graph_files)} assemblies to the index")
         return len(graph_files)
+
+    def _build_index_with_metadata(self, image_dir):
+        """
+        Build the index with metadata integration
+
+        Args:
+            image_dir (str): Directory containing images to index
+
+        Returns:
+            count (int): Number of images indexed
+        """
+        # Collect all image paths
+        image_paths = []
+        extensions = ('.png', '.jpg', '.jpeg')
+        for root, _, files in os.walk(image_dir):
+            for file in files:
+                if file.lower().endswith(extensions):
+                    full_path = os.path.join(root, file)
+                    image_paths.append(full_path)
+
+        if not image_paths:
+            print(f"No images found in {image_dir} with extensions {extensions}")
+            return 0
+
+        print(f"Found {len(image_paths)} images, generating embeddings with metadata...")
+
+        # Dictionary to cache BOM data to avoid repeated loading
+        bom_cache = {}
+
+        # Process images in batches
+        batch_size = self.config["training"]["batch_size"]
+        for i in tqdm(range(0, len(image_paths), batch_size)):
+            batch_paths = image_paths[i:i+batch_size]
+
+            # Get visual embeddings
+            batch_visual_embeddings = self.image_encoder.encode_batch(batch_paths, batch_size)
+
+            # Prepare for metadata integration
+            batch_metadata = []
+            batch_metadata_embeddings = []
+
+            # For each image, extract part info and find metadata
+            for path in batch_paths:
+                part_info = self.extract_part_info(path)
+                batch_metadata.append(part_info)
+
+                # Try to find BOM data for this part
+                metadata_found = False
+                if part_info and part_info.get("parent_step"):
+                    parent_step = part_info["parent_step"]
+                    part_name = part_info["part_name"]
+
+                    # Get BOM path
+                    bom_dir = self.config.get("metadata", {}).get("bom_dir")
+                    bom_path = os.path.join(bom_dir, f"{parent_step}_bom.json")
+
+                    # Check if BOM exists
+                    if os.path.exists(bom_path):
+                        try:
+                            # Load BOM data (or get from cache)
+                            if bom_path not in bom_cache:
+                                bom_cache[bom_path] = self.metadata_encoder.load_bom_data(bom_path)
+
+                            bom_data = bom_cache[bom_path]
+
+                            # Find metadata for this part
+                            part_metadata = self.metadata_encoder.find_part_metadata(bom_data, part_name)
+
+                            if part_metadata:
+                                # Encode metadata
+                                metadata_embedding = self.metadata_encoder.encode_metadata(part_metadata)
+                                batch_metadata_embeddings.append(metadata_embedding)
+                                metadata_found = True
+                        except Exception as e:
+                            print(f"Error processing metadata for {path} (part: {part_name}): {e}")
+                            # Add to problematic files log for reference
+                            with open(os.path.join(self.config["data"]["output_dir"], "problematic_bom_files.txt"), "a") as log:
+                                log.write(f"{bom_path}: {e}\n")
+
+                # If no metadata found, use a zero embedding of the right size
+                if not metadata_found:
+                    zero_embedding = torch.zeros((1, self.metadata_encoder.output_dim),
+                                                device=self.metadata_encoder.device)
+                    batch_metadata_embeddings.append(zero_embedding)
+
+            # Combine all metadata embeddings
+            if batch_metadata_embeddings:
+                metadata_embeddings = torch.cat(batch_metadata_embeddings, dim=0)
+
+                # Ensure dimensions match
+                if metadata_embeddings.shape[0] != batch_visual_embeddings.shape[0]:
+                    print(f"Warning: Metadata batch size ({metadata_embeddings.shape[0]}) doesn't match visual batch size ({batch_visual_embeddings.shape[0]})")
+                    # Adjust to the smaller size
+                    min_size = min(metadata_embeddings.shape[0], batch_visual_embeddings.shape[0])
+                    metadata_embeddings = metadata_embeddings[:min_size]
+                    batch_visual_embeddings = batch_visual_embeddings[:min_size]
+                    batch_paths = batch_paths[:min_size]
+                    batch_metadata = batch_metadata[:min_size]
+
+                # Fuse embeddings
+                batch_fused_embeddings = torch.zeros_like(batch_visual_embeddings)
+                for j in range(batch_visual_embeddings.shape[0]):
+                    visual_emb = batch_visual_embeddings[j:j+1]
+                    metadata_emb = metadata_embeddings[j:j+1]
+                    batch_fused_embeddings[j:j+1] = self.fusion_module.fuse(visual_emb, metadata_emb)
+
+                # Add to index
+                self.vector_db.add_embeddings(batch_fused_embeddings, batch_paths, batch_metadata)
+            else:
+                # If no metadata embeddings were generated, just use visual
+                self.vector_db.add_embeddings(batch_visual_embeddings, batch_paths, batch_metadata)
+
+        print(f"Added {len(image_paths)} images to the index")
+        return len(image_paths)
 
     def retrieve_similar(self, query_image_path, k=10, rotation_invariant=True, num_rotations=8):
         """
@@ -808,67 +912,20 @@ class RetrievalSystem:
         
         # Search the assembly database
         print(f"Searching assembly database for {k} nearest neighbors...")
-        search_results = self.assembly_db.search(query_embedding, k=k)
+        distances, indices = self.assembly_db.search(query_embedding, k=k)
         
-        # Handle different return formats from search method
-        if isinstance(search_results, dict):
-            # If search returns a dictionary with distances and indices
-            distances = search_results.get("distances", [])
-            indices = search_results.get("indices", [])
-        elif isinstance(search_results, tuple) and len(search_results) == 2:
-            # If search returns a tuple of (distances, indices)
-            distances, indices = search_results
-        else:
-            print(f"Unexpected search result format: {type(search_results)}")
-            return {"distances": [], "indices": [], "paths": [], "similarities": []}
-        
-        # Ensure distances and indices are in the expected format (2D arrays)
-        import numpy as np
-        
-        # Convert to numpy arrays if they are lists
-        if isinstance(distances, list):
-            distances = np.array(distances)
-        if isinstance(indices, list):
-            indices = np.array(indices)
-            
-        # Reshape if needed
-        if hasattr(distances, 'shape') and len(distances.shape) == 1:
-            distances = distances.reshape(1, -1)
-        if hasattr(indices, 'shape') and len(indices.shape) == 1:
-            indices = indices.reshape(1, -1)
-            
-        # Ensure we have 2D arrays even if they're lists
-        if not hasattr(distances, 'shape'):
-            distances = [distances]
-        if not hasattr(indices, 'shape'):
-            indices = [indices]
-            
         # Process results
         paths = []
         part_info = []
         similarities = []
         
         for i, idx in enumerate(indices[0]):
-            # Get path from metadata - the metadata is a direct mapping of indices to file paths
-            idx_str = str(int(idx))  # Convert to string for dictionary lookup
-            if 'id_to_path' in self.assembly_db.metadata and idx_str in self.assembly_db.metadata['id_to_path']:
-                path = self.assembly_db.metadata['id_to_path'][idx_str]
-            else:
-                path = "unknown"
+            # Get path from metadata
+            path = self.assembly_db.metadata.get(idx, {}).get("path", "unknown")
             paths.append(path)
             
-            # Extract STEP ID from metadata or path
-            if 'step_ids' in self.assembly_db.metadata and idx_str in self.assembly_db.metadata['step_ids']:
-                step_id = self.assembly_db.metadata['step_ids'][idx_str]
-            elif path and path != "unknown":
-                step_id = os.path.basename(path).split('_')[0]
-            else:
-                step_id = "Unknown"
-            
             # Get part info from metadata
-            info = {}
-            if "part_info" in self.assembly_db.metadata and idx_str in self.assembly_db.metadata["part_info"]:
-                info = self.assembly_db.metadata["part_info"][idx_str]
+            info = self.assembly_db.metadata.get(idx, {}).get("part_info", {})
             part_info.append(info)
             
             # Calculate similarity score (inverse of distance)
@@ -886,31 +943,8 @@ class RetrievalSystem:
             "query_graph_path": query_graph_path
         }
         
-        # Print raw results before deduplication
-        print("\nRaw results before deduplication:")
-        for i, (idx, dist, path, sim) in enumerate(zip(results["indices"], results["distances"], results["paths"], results["similarities"])):
-            # Get path from metadata
-            idx_str = str(int(idx))  # Convert to string for dictionary lookup
-            if 'id_to_path' in self.assembly_db.metadata and idx_str in self.assembly_db.metadata['id_to_path']:
-                path = self.assembly_db.metadata['id_to_path'][idx_str]
-            else:
-                path = "unknown"
-            
-            # Extract STEP ID from metadata or path
-            if 'step_ids' in self.assembly_db.metadata and idx_str in self.assembly_db.metadata['step_ids']:
-                step_id = self.assembly_db.metadata['step_ids'][idx_str]
-            elif path and path != "unknown":
-                step_id = os.path.basename(path).split('_')[0]
-            else:
-                step_id = "Unknown"
-                
-            print(f"Raw Result {i+1}: Index={idx}, STEP ID={step_id}, Path={os.path.basename(path) if path != 'unknown' else 'unknown'}, Distance={dist:.4f}, Similarity={sim:.1f}%")
-        
         # Remove duplicate STEP IDs from results
         unique_results = self._deduplicate_assembly_results(results)
-        
-        # Print info about deduplication
-        print(f"\nAfter deduplication: {len(results['indices'])} results -> {len(unique_results['indices'])} unique results")
         
         print("\nRaw distances:")
         for i, dist in enumerate(unique_results["distances"]):
@@ -918,21 +952,7 @@ class RetrievalSystem:
             
         print("\nRaw distances and indices between query and results:")
         for i, (idx, dist) in enumerate(zip(unique_results["indices"], unique_results["distances"])):
-            # Get path from metadata
-            idx_str = str(int(idx))  # Convert to string for dictionary lookup
-            if 'id_to_path' in self.assembly_db.metadata and idx_str in self.assembly_db.metadata['id_to_path']:
-                path = self.assembly_db.metadata['id_to_path'][idx_str]
-            else:
-                path = "unknown"
-            
-            # Extract STEP ID from metadata or path
-            if 'step_ids' in self.assembly_db.metadata and idx_str in self.assembly_db.metadata['step_ids']:
-                step_id = self.assembly_db.metadata['step_ids'][idx_str]
-            elif path and path != "unknown":
-                step_id = os.path.basename(path).split('_')[0]
-            else:
-                step_id = "Unknown"
-                
+            step_id = self.assembly_db.metadata.get(idx, {}).get("step_id", "Unknown")
             print(f"Result {i+1}: Index={idx}, STEP ID={step_id}, L2 Distance={dist:.4f}")
         
         print(f"--- Assembly Retrieval Process Complete ---\n")
@@ -1101,7 +1121,8 @@ class RetrievalSystem:
             aggregated_features = self.assembly_fusion.aggregate_part_features(part_embeddings_tensor, aggregation_method)
             
             print(f"Successfully aggregated features from {len(part_embeddings)} parts for assembly {step_id}")
-            return aggregated_features    
+            return aggregated_features
+            
         except Exception as e:
             print(f"Error getting part features for assembly {step_id}: {e}")
             import traceback
@@ -1118,8 +1139,8 @@ class RetrievalSystem:
         Returns:
             unique_results (dict): Deduplicated search results
         """
-        # Create a dictionary to track unique entries
-        unique_entries = {}
+        # Create a dictionary to track unique STEP IDs
+        unique_step_ids = {}
         unique_indices = []
         unique_distances = []
         unique_paths = []
@@ -1130,15 +1151,9 @@ class RetrievalSystem:
         for i, idx in enumerate(results["indices"]):
             step_id = self.assembly_db.metadata.get(idx, {}).get("step_id", "Unknown")
             
-            # For unknown STEP IDs, use the index as a unique identifier
-            if step_id == "Unknown":
-                unique_key = f"Unknown_{idx}"
-            else:
-                unique_key = step_id
-            
-            # Only add if this unique key hasn't been seen before
-            if unique_key not in unique_entries:
-                unique_entries[unique_key] = True
+            # Only add if this STEP ID hasn't been seen before
+            if step_id not in unique_step_ids:
+                unique_step_ids[step_id] = True
                 unique_indices.append(idx)
                 unique_distances.append(results["distances"][i])
                 
@@ -1289,11 +1304,142 @@ class RetrievalSystem:
             print(f"Visualization saved to {output_path}")
 
             return output_path
+
+    def visualize_assembly_results(self, query, results, output_path=None):
+        """
+        Visualize assembly retrieval results
+        
+        Args:
+            query (str): Query STEP ID or graph file path
+            results (dict): Search results from retrieve_similar_assemblies
+            output_path (str): Optional path to save the visualization
+            
+        Returns:
+            output_path (str): Path to the saved visualization
+        """
+        if not self.use_assembly:
+            print("Assembly similarity not enabled")
+            return None
+        
+        try:
+            # Create output directory if it doesn't exist
+            output_dir = os.path.join(self.config["data"]["output_dir"], "results/assembly_searches")
+            os.makedirs(output_dir, exist_ok=True)
+
+            # Get query STEP ID
+            if "query_step_id" in results:
+                query_step_id = results["query_step_id"]
+            elif os.path.exists(query) and query.endswith("_hierarchical.graphml"):
+                query_step_id = self.assembly_encoder.extract_step_id(query)
+            else:
+                query_step_id = query
+            
+            # Create default output path if none provided
+            if output_path is None:
+                results_dir = os.path.join(self.config["data"]["output_dir"], "results", "assembly_searches")
+                os.makedirs(results_dir, exist_ok=True)
+                output_path = os.path.join(results_dir, f"assembly_search_{query_step_id}.html")
+            
+            # Create an HTML visualization
+            # Determine if fusion is enabled
+            fusion_enabled = self.config.get("assembly", {}).get("fusion", {}).get("enabled", False)
+            fusion_method = self.config.get("assembly", {}).get("fusion", {}).get("method", "weighted")
+            
+            fusion_info = ""
+            if fusion_enabled and self.assembly_fusion is not None:
+                # Get fusion weights
+                graph_weight = self.config.get("assembly", {}).get("fusion", {}).get("graph_weight", 0.6)
+                part_weight = self.config.get("assembly", {}).get("fusion", {}).get("part_weight", 0.4)
+                part_aggregation = self.config.get("assembly", {}).get("fusion", {}).get("part_aggregation", "mean")
+                
+                fusion_info = f"<p>Using fusion approach: {fusion_method} (Graph: {graph_weight:.1f}, Parts: {part_weight:.1f}, Aggregation: {part_aggregation})</p>"
+            else:
+                fusion_info = "<p>Using graph-only approach (no fusion)</p>"
+            
+            html_content = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Assembly Search Results for {query_step_id}</title>
+                <style>
+                    body {{ font-family: Arial, sans-serif; margin: 20px; }}
+                    .results {{ display: flex; flex-direction: column; }}
+                    .result {{ margin: 10px; padding: 15px; border: 1px solid #ccc; border-radius: 5px; }}
+                    .step-id {{ font-weight: bold; font-size: 18px; }}
+                    .similarity {{ 
+                        padding: 5px 10px;
+                        border-radius: 10px;
+                        font-weight: bold;
+                    }}
+                    .similarity-high {{ background-color: #d4edda; color: #155724; }}
+                    .similarity-medium {{ background-color: #fff3cd; color: #856404; }}
+                    .similarity-low {{ background-color: #f8d7da; color: #721c24; }}
+                    .details {{ margin-top: 10px; }}
+                    .info-box {{ background-color: #e9ecef; padding: 10px; border-radius: 5px; margin-bottom: 20px; }}
+                </style>
+            </head>
+            <body>
+                <h1>Assembly Search Results</h1>
+                <h2>Query: {query_step_id}</h2>
+                
+                <div class="info-box">
+                    {fusion_info}
+                </div>
+                
+                <div class="results">
+            """
+            
+            # Add results
+            for i, (path, similarity) in enumerate(zip(
+                    results["paths"],
+                    results.get("similarities", [None] * len(results["paths"]))
+                )):
+                
+                # Get assembly info
+                step_id = self.assembly_encoder.extract_step_id(path) if path else "unknown"
+                
+                # Format similarity score and determine class
+                similarity_str = f"{similarity:.1f}%" if similarity is not None else "N/A"
+                if similarity >= 70:
+                    similarity_class = "similarity-high"
+                elif similarity >= 50:
+                    similarity_class = "similarity-medium"
+                else:
+                    similarity_class = "similarity-low"
+                
+                # Add this result to the HTML
+                html_content += f"""
+                    <div class="result">
+                        <div class="result-header">
+                            <div class="step-id">#{i+1}: STEP ID: {step_id}</div>
+                            <div class="similarity {similarity_class}">Similarity: {similarity_str}</div>
+                        </div>
+                        <div class="details">
+                            <p>Graph file: {os.path.basename(path) if path else "unknown"}</p>
+                        </div>
+                    </div>
+                """
+            
+            # Close HTML
+            html_content += """
+                </div>
+            </body>
+            </html>
+            """
+            
+            # Write to file
+            with open(output_path, 'w') as f:
+                f.write(html_content)
+            
+            print(f"Assembly visualization saved to {output_path}")
+            return output_path
         except Exception as e:
-            print(f"Error visualizing results: {e}")
+            print(f"Error visualizing assembly results: {e}")
             import traceback
             traceback.print_exc()
             return None
+        finally:
+            pass
 
     def evaluate(self, query_dir=None, ground_truth=None):
         """
@@ -1661,117 +1807,3 @@ class RetrievalSystem:
             "metadata": metadata_info,
             "assembly": assembly_info
         }
-
-    def _build_index_with_metadata(self, image_dir):
-        """
-        Build the index with metadata integration
-
-        Args:
-            image_dir (str): Directory containing images to index
-
-        Returns:
-            count (int): Number of images indexed
-        """
-        # Collect all image paths
-        image_paths = []
-        extensions = ('.png', '.jpg', '.jpeg')
-        for root, _, files in os.walk(image_dir):
-            for file in files:
-                if file.lower().endswith(extensions):
-                    full_path = os.path.join(root, file)
-                    image_paths.append(full_path)
-
-        if not image_paths:
-            print(f"No images found in {image_dir} with extensions {extensions}")
-            return 0
-
-        print(f"Found {len(image_paths)} images, generating embeddings with metadata...")
-
-        # Dictionary to cache BOM data to avoid repeated loading
-        bom_cache = {}
-
-        # Process images in batches
-        batch_size = self.config["training"]["batch_size"]
-        for i in tqdm(range(0, len(image_paths), batch_size)):
-            batch_paths = image_paths[i:i+batch_size]
-
-            # Get visual embeddings
-            batch_visual_embeddings = self.image_encoder.encode_batch(batch_paths, batch_size)
-
-            # Prepare for metadata integration
-            batch_metadata = []
-            batch_metadata_embeddings = []
-
-            # For each image, extract part info and find metadata
-            for path in batch_paths:
-                part_info = self.extract_part_info(path)
-                batch_metadata.append(part_info)
-
-                # Try to find BOM data for this part
-                metadata_found = False
-                if part_info and part_info.get("parent_step"):
-                    parent_step = part_info["parent_step"]
-                    part_name = part_info["part_name"]
-
-                    # Get BOM path
-                    bom_dir = self.config.get("metadata", {}).get("bom_dir")
-                    bom_path = os.path.join(bom_dir, f"{parent_step}_bom.json")
-
-                    # Check if BOM exists
-                    if os.path.exists(bom_path):
-                        try:
-                            # Load BOM data (or get from cache)
-                            if bom_path not in bom_cache:
-                                bom_cache[bom_path] = self.metadata_encoder.load_bom_data(bom_path)
-
-                            bom_data = bom_cache[bom_path]
-
-                            # Find metadata for this part
-                            part_metadata = self.metadata_encoder.find_part_metadata(bom_data, part_name)
-
-                            if part_metadata:
-                                # Encode metadata
-                                metadata_embedding = self.metadata_encoder.encode_metadata(part_metadata)
-                                batch_metadata_embeddings.append(metadata_embedding)
-                                metadata_found = True
-                        except Exception as e:
-                            print(f"Error processing metadata for {path} (part: {part_name}): {e}")
-                            # Add to problematic files log for reference
-                            with open(os.path.join(self.config["data"]["output_dir"], "problematic_bom_files.txt"), "a") as log:
-                                log.write(f"{bom_path}: {e}\n")
-
-                # If no metadata found, use a zero embedding of the right size
-                if not metadata_found:
-                    zero_embedding = torch.zeros((1, self.metadata_encoder.output_dim),
-                                                device=self.metadata_encoder.device)
-                    batch_metadata_embeddings.append(zero_embedding)
-
-            # Combine all metadata embeddings
-            if batch_metadata_embeddings:
-                metadata_embeddings = torch.cat(batch_metadata_embeddings, dim=0)
-
-                # Ensure dimensions match
-                if metadata_embeddings.shape[0] != batch_visual_embeddings.shape[0]:
-                    print(f"Warning: Metadata batch size ({metadata_embeddings.shape[0]}) doesn't match visual batch size ({batch_visual_embeddings.shape[0]})")
-                    # Adjust to the smaller size
-                    min_size = min(metadata_embeddings.shape[0], batch_visual_embeddings.shape[0])
-                    metadata_embeddings = metadata_embeddings[:min_size]
-                    batch_visual_embeddings = batch_visual_embeddings[:min_size]
-                    batch_paths = batch_paths[:min_size]
-                    batch_metadata = batch_metadata[:min_size]
-
-                # Fuse embeddings
-                batch_fused_embeddings = torch.zeros_like(batch_visual_embeddings)
-                for j in range(batch_visual_embeddings.shape[0]):
-                    visual_emb = batch_visual_embeddings[j:j+1]
-                    metadata_emb = metadata_embeddings[j:j+1]
-                    batch_fused_embeddings[j:j+1] = self.fusion_module.fuse(visual_emb, metadata_emb)
-
-                # Add to index
-                self.vector_db.add_embeddings(batch_fused_embeddings, batch_paths, batch_metadata)
-            else:
-                # If no metadata embeddings were generated, just use visual
-                self.vector_db.add_embeddings(batch_visual_embeddings, batch_paths, batch_metadata)
-
-        print(f"Added {len(image_paths)} images to the index")
-        return len(image_paths)

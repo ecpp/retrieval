@@ -59,8 +59,12 @@ class AssemblyFusionModule:
         
         # For weighted fusion, we'll use the provided weights
         elif fusion_method == "weighted":
-            print("=======================================================================================")
-            pass
+            print(f"Initializing weighted fusion with graph_weight={graph_weight:.2f}, part_weight={part_weight:.2f}")
+            # Ensure weights are normalized
+            total_weight = graph_weight + part_weight
+            self.graph_weight = graph_weight / total_weight
+            self.part_weight = part_weight / total_weight
+            print(f"Normalized weights: graph_weight={self.graph_weight:.2f}, part_weight={self.part_weight:.2f}")
         
         else:
             raise ValueError(f"Unsupported fusion method: {fusion_method}")
@@ -118,9 +122,23 @@ class AssemblyFusionModule:
             sum_weights = self.graph_weight + self.part_weight
             norm_graph_weight = self.graph_weight / sum_weights
             norm_part_weight = self.part_weight / sum_weights
-
-            # Weighted sum
-            fused = norm_graph_weight * graph_embedding + norm_part_weight * part_features_embedding
+            
+            # Special case: if either weight is 0, use only the other embedding
+            if self.graph_weight <= 0.001:
+                print(f"Graph weight is near zero ({self.graph_weight:.4f}), using only part features")
+                fused = part_features_embedding
+            elif self.part_weight <= 0.001:
+                print(f"Part weight is near zero ({self.part_weight:.4f}), using only graph features")
+                fused = graph_embedding
+            else:
+                # Apply weighted sum
+                fused = norm_graph_weight * graph_embedding + norm_part_weight * part_features_embedding
+            
+            # Add debug information
+            print(f"Fusion weights applied - Graph: {norm_graph_weight:.2f}, Part: {norm_part_weight:.2f}")
+            print(f"Graph embedding shape: {graph_embedding.shape}, Part embedding shape: {part_features_embedding.shape}")
+            print(f"Fused embedding shape: {fused.shape}")
+            
             return fused
 
     def aggregate_part_features(self, part_embeddings, aggregation_method="mean"):
