@@ -734,6 +734,261 @@ class RetrievalSystem:
             import traceback
             traceback.print_exc()
             return {"paths": [], "distances": [], "similarities": []}
+    
+    def _rerank_by_size(self, results, query_metadata, size_weight=0.3):
+        """
+        Rerank results based on size similarity
+
+        Args:
+            results (dict): Search results
+            query_metadata (dict): Query part metadata
+            size_weight (float): Weight to give to size similarity (0-1)
+
+        Returns:
+            results (dict): Reranked results
+        """
+        if not query_metadata or "properties" not in query_metadata:
+            print("No query metadata available for size-based reranking")
+            return results
+
+        # Extract size features from query metadata
+        query_size = self._extract_size_features(query_metadata)
+        if not query_size:
+            print("Could not extract size features from query metadata")
+            return results
+
+        print("\n--- Size-Based Reranking Debug Information ---")
+        print(f"Query part size features: {{\n  \"length\": {query_size['length']},\n  \"width\": {query_size['width']},\n  \"height\": {query_size['height']},\n  \"volume\": {query_size['volume']},\n  \"surface_area\": {query_size['surface_area']},\n  \"max_dimension\": {query_size['max_dimension']},\n  \"min_dimension\": {query_size['min_dimension']},\n  \"mid_dimension\": {query_size['mid_dimension']}\n}}")
+
+        # Load BOM data for each result part
+        bom_dir = self.config.get("metadata", {}).get("bom_dir")
+        if not bom_dir:
+            print("BOM directory not specified in config")
+            return results
+
+        # Load all necessary BOM files ahead of time to avoid redundant loading
+        bom_data_cache = {}
+        for part_info in results["part_info"]:
+            if part_info and "parent_step" in part_info:
+                step = part_info["parent_step"]
+                if step not in bom_data_cache:
+                    bom_path = os.path.join(bom_dir, f"{step}_bom.json")
+                    if os.path.exists(bom_path):
+                        bom_data_cache[step] = self.metadata_encoder.load_bom_data(bom_path)
+                    else:
+                        bom_data_cache[step] = {}
+
+        # Prepare to store size similarity scores
+        similarities = []
+        part_sizes = []
+
+        # Find metadata for all parts
+        for part_info in results["part_info"]:
+            if part_info and "parent_step" in part_info:
+                step = part_info["parent_step"]
+                part_name = part_info.get("part_name", "unknown")
+
+                # Get BOM data from cache
+                bom_data = bom_data_cache.get(step, {})
+                part_metadata = self.metadata_encoder.find_part_metadata(bom_data, part_name)
+
+                # Extract size features if metadata is available
+                if part_metadata and "properties" in part_metadata:
+                    part_size = self._extract_size_features(part_metadata)
+                    part_sizes.append(part_size)
+                else:
+                    part_sizes.append(None)
+            else:
+                part_sizes.append(None)
+
+        # Calculate size similarity scores
+        for idx, part_size in enumerate(part_sizes):
+            part_name = results["part_info"][idx]["part_name"] if idx < len(results["part_info"]) and results["part_info"][idx] else "unknown"
+            if part_size:
+                # Calculate size similarity using the enhanced method
+                size_sim = self._calculate_size_similarity(query_size, part_size, debug=True, part_name=part_name)
+                similarities.append(size_sim)
+            else:
+                similarities.append(None)
+
+        # Print original vs. adjusted similarities header
+        print("\nOriginal vs. Adjusted Similarities:")
+        print("---------------------------------------")
+        print("Part                 | Original   | Size Sim   | Adjusted")
+        print("---------------------------------------")
+
+        # Combine size similarity with visual similarity for reranking
+        reranked_scores = []
+        for idx, (similarity, size_sim) in enumerate(zip(results["similarities"], similarities)):
+            part_name = results["part_info"][idx]["part_name"] if idx < len(results["part_info"]) and results["part_info"][idx] else "unknown"
+
+            # Default to original score if no size similarity available
+            if size_sim is None:
+                reranked_scores.append(similarity)
+                continue
+
+            # Get the original visual similarity
+            original_score = similarity
+
+            # Apply different strategies based on size similarity
+            if size_sim >= 95:
+                # For nearly identical size (95-100%), give a strong boost with minimal penalty
+                # The higher the size_sim, the less penalty applied
+                boost_factor = 1.0 + 0.5 * (size_sim - 95) / 5  # Boost factor from 1.0 to 1.5
+                # New formula gives less penalty for perfect size matches
+                adjusted_score = original_score + (100 - original_score) * (1 - size_weight / boost_factor)
+            elif size_sim >= 50:
+                # For good size matches (50-95%), apply standard weighted formula
+                adjusted_score = original_score * (1 - size_weight) + size_sim * size_weight
+            elif size_sim <= 5:
+                # For very poor size matches (0-5%), apply a more severe penalty
+                # The worse the size match, the more severe the penalty
+                penalty_factor = 1.0 + 4.0 * (5 - size_sim) / 5  # Penalty factor from 1.0 to 5.0
+                adjusted_score = original_score * (1 - size_weight * penalty_factor)
+                # Ensure score doesn't drop below 10% of original
+                adjusted_score = max(adjusted_score, original_score * 0.1)
+            else:
+                # For moderate size matches (5-50%), use the standard formula
+                adjusted_score = original_score * (1 - size_weight) + size_sim * size_weight
+
+            # Display debugging information
+            print(f"{part_name:20} | {original_score:.2f}      | {size_sim:.2f}     | {adjusted_score:.2f}")
+
+            reranked_scores.append(adjusted_score)
+
+        # Update similarities in results
+        results["similarities"] = reranked_scores
+
+        # Sort results based on the reranked similarities
+        indices = np.argsort(reranked_scores)[::-1]  # Sort in descending order
+
+        # Reorder everything based on the new ranking
+        results["similarities"] = [reranked_scores[i] for i in indices]
+        results["distances"] = [results["distances"][i] for i in indices] if "distances" in results else []
+        results["paths"] = [results["paths"][i] for i in indices] if "paths" in results else []
+        results["part_info"] = [results["part_info"][i] for i in indices] if "part_info" in results else []
+
+        print("\n--- End of Size-Based Reranking Debug ---\n")
+        return results
+    
+    def _extract_size_features(self, metadata):
+        """
+        Extract size-related features from part metadata
+
+        Args:
+            metadata (dict): Part metadata
+
+        Returns:
+            size_features (dict): Dictionary of size features or None if not available
+        """
+        try:
+            properties = metadata.get("properties", metadata)
+            if "type" in metadata and isinstance(metadata.get("properties"), dict):
+                properties = metadata.get("properties")
+
+            if not properties or not isinstance(properties, dict):
+                return None
+
+            # Extract the dimensional features
+            size_features = {
+                "length": float(properties.get("length", properties.get("Length", 0.0))),
+                "width": float(properties.get("width", properties.get("Width", 0.0))),
+                "height": float(properties.get("height", properties.get("Height", 0.0))),
+                "volume": float(properties.get("volume", properties.get("Volume", 0.0))),
+                "surface_area": float(properties.get("surface_area", properties.get("SurfaceArea", 0.0))),
+                "max_dimension": float(properties.get("max_dimension", properties.get("MaxDimension", 0.0))),
+                "min_dimension": float(properties.get("min_dimension", properties.get("MinDimension", 0.0))),
+                "mid_dimension": float(properties.get("mid_dimension", properties.get("MidDimension", 0.0)))
+            }
+
+            # Check if we have enough valid data
+            valid_values = [v for v in size_features.values() if v > 0]
+            if len(valid_values) < 3:  # Need at least 3 valid dimensions
+                return None
+
+            return size_features
+        except Exception as e:
+            print(f"Error extracting size features: {e}")
+            return None
+    
+    def _calculate_size_similarity(self, size1, size2, debug=False, part_name=""):
+        """
+        Calculate size similarity between two parts (0-100 scale)
+
+        Args:
+            size1 (dict): Size features of first part
+            size2 (dict): Size features of second part
+            debug (bool): Whether to print debug information
+            part_name (str): Name of the part for debugging
+
+        Returns:
+            similarity (float): Size similarity score (0-100)
+        """
+        if not size1 or not size2:
+            return 0
+
+        try:
+            # Calculate volume ratio (larger / smaller)
+            vol1 = max(0.001, size1.get("volume", 0))
+            vol2 = max(0.001, size2.get("volume", 0))
+
+            volume_ratio = max(vol1, vol2) / min(vol1, vol2)
+
+            # Calculate difference in each dimension
+            dim_diffs = []
+            dim_ratios = {}
+            for dim in ["length", "width", "height", "max_dimension", "min_dimension", "mid_dimension"]:
+                val1 = size1.get(dim, 0)
+                val2 = size2.get(dim, 0)
+                if val1 > 0 and val2 > 0:
+                    # Calculate ratio (larger / smaller)
+                    ratio = max(val1, val2) / max(0.001, min(val1, val2))
+                    dim_diffs.append(ratio)
+                    dim_ratios[dim] = ratio
+
+            # Calculate bounding box diagonal ratio
+            diagonal1 = math.sqrt(size1.get("length", 0)**2 + size1.get("width", 0)**2 + size1.get("height", 0)**2)
+            diagonal2 = math.sqrt(size2.get("length", 0)**2 + size2.get("width", 0)**2 + size2.get("height", 0)**2)
+
+            if diagonal1 > 0 and diagonal2 > 0:
+                diagonal_ratio = max(diagonal1, diagonal2) / min(diagonal1, diagonal2)
+            else:
+                diagonal_ratio = 10  # Default penalty if diagonals can't be calculated
+
+            # Calculate overall similarity score
+            # Combine volume ratio and average dimension ratio
+            if dim_diffs:
+                avg_dim_ratio = sum(dim_diffs) / len(dim_diffs)
+
+                # Use a weighted combination, with more emphasis on volume
+                # which is a better overall indicator of size similarity
+                combined_ratio = 0.5 * volume_ratio + 0.3 * avg_dim_ratio + 0.2 * diagonal_ratio
+            else:
+                combined_ratio = volume_ratio
+
+            # Convert to similarity score (1.0 = perfect match, higher ratios = lower similarity)
+            # Use a gentler exponential decay function to be more tolerant of small differences
+            # Fine-tune the decay factor from -0.5 to -0.3 to be more forgiving
+            adjusted_ratio = combined_ratio - 1  # Normalize so 1 (perfect match) becomes 0
+            similarity = 100 * math.exp(-0.3 * adjusted_ratio)
+
+            # For nearly identical parts, ensure very high similarity
+            # If the ratio is extremely close to 1 (e.g., <1.05), boost the score
+            if combined_ratio < 1.05:
+                similarity = max(similarity, 95)  # Ensure at least 95% similarity
+
+            if debug:
+                print(f"\nSize comparison for {part_name}:")
+                print(f"  Volume: {vol1:.1f} vs {vol2:.1f} (ratio: {volume_ratio:.3f})")
+                print(f"  Dimension ratios: {json.dumps(dim_ratios, indent=2)}")
+                print(f"  Avg dimension ratio: {avg_dim_ratio:.3f}, Diagonal ratio: {diagonal_ratio:.3f}")
+                print(f"  Combined ratio: {combined_ratio:.3f}")
+                print(f"  Final size similarity: {similarity:.2f}%")
+
+            return similarity
+        except Exception as e:
+            print(f"Error calculating size similarity: {e}")
+            return 0
 
     def retrieve_similar_assemblies(self, query, k=10):
         """
