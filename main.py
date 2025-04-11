@@ -14,6 +14,9 @@ def parse_args():
         - Search by image: python main.py retrieve --query path/to/image.png --k 5 --visualize
         - Search by part name: python main.py retrieve --part-name "screw" --k 5 --visualize
         - Advanced search: python main.py retrieve --part-name "bolt" --match-threshold 0.6 --rotation-invariant
+        - Assembly search: python main.py retrieve --full-assembly "A123" --k 5
+        - List assembly parts: python main.py list-assembly-parts --assembly-id "A123"
+        - Search with selected parts: python main.py retrieve --full-assembly "A123" --select-parts "A123_part1.png" "A123_part2.png"
         """
     )
 
@@ -46,6 +49,9 @@ def parse_args():
     retrieve_parser = subparsers.add_parser('retrieve', help='Retrieve similar parts')
     retrieve_parser.add_argument('--query', type=str, help='Path to query image')
     retrieve_parser.add_argument('--part-name', type=str, help='Part name to search for')
+    retrieve_parser.add_argument('--full-assembly', type=str, help='Assembly ID to search for similar assemblies')
+    retrieve_parser.add_argument('--select-parts', type=str, nargs='+',
+                                help='List of part filenames to include in assembly search (only used with --full-assembly)')
     retrieve_parser.add_argument('--k', type=int, default=10, help='Number of results to retrieve')
     retrieve_parser.add_argument('--visualize', action='store_true', help='Visualize the results')
     retrieve_parser.add_argument('--rotation-invariant', action='store_true', help='Enable rotation-invariant search')
@@ -63,6 +69,10 @@ def parse_args():
     # Info command
     subparsers.add_parser('info', help='Display system information')
 
+    # List assembly parts command
+    list_parts_parser = subparsers.add_parser('list-assembly-parts', help='List all parts in an assembly')
+    list_parts_parser.add_argument('--assembly-id', type=str, required=True, help='Assembly ID to list parts for')
+
     return parser.parse_args()
 
 
@@ -78,9 +88,49 @@ def main():
         retrieval_system.use_metadata = True
         print("Metadata integration enabled via command line")
 
+    # Process commands
     if args.command == 'ingest':
         print(f"Ingesting data from {args.dataset_dir}")
         retrieval_system.ingest_data(args.dataset_dir)
+
+    elif args.command == 'list-assembly-parts':
+        # List all parts for the specified assembly
+        assembly_id = args.assembly_id
+        print(f"Listing parts for assembly ID: {assembly_id}")
+
+        # Find all parts that belong to the assembly
+        image_dir = os.path.join(retrieval_system.config["data"]["output_dir"], "images")
+        assembly_parts = []
+
+        # Pattern for parts belonging to this assembly: "{assembly_id}_*.png"
+        for filename in os.listdir(image_dir):
+            if filename.startswith(f"{assembly_id}_") and filename.lower().endswith(('.png', '.jpg', '.jpeg')):
+                assembly_parts.append(filename)
+
+        if not assembly_parts:
+            print(f"No parts found for assembly ID {assembly_id}")
+            return
+
+        print(f"Found {len(assembly_parts)} parts for assembly ID {assembly_id}:")
+
+        # Sort parts by name for easier viewing
+        assembly_parts.sort()
+
+        # Print parts in a formatted list
+        for i, part_filename in enumerate(assembly_parts):
+            # Try to extract more information about the part if available
+            part_info = None
+            try:
+                part_info = retrieval_system.extract_part_info(os.path.join(image_dir, part_filename))
+            except:
+                pass
+
+            part_name = part_info.get("part_name", "Unknown") if part_info else "Unknown"
+            print(f"{i+1}. {part_filename} - {part_name}")
+
+        # Print a command example for selecting specific parts
+        parts_example = " ".join(assembly_parts[:min(3, len(assembly_parts))])
+        print(f"\nTo search using specific parts, use: python main.py retrieve --full-assembly {assembly_id} --select-parts {parts_example}")
 
     elif args.command == 'train-autoencoder':
         # Make sure metadata is enabled first
@@ -135,13 +185,14 @@ def main():
 
     elif args.command == 'retrieve':
         # Validate input - either query image or part name must be specified
-        if not args.query and not args.part_name:
-            print("Error: Either --query or --part-name must be specified")
+        if not args.query and not args.part_name and not args.full_assembly:
+            print("Error: Either --query, --part-name, or --full-assembly must be specified")
             return
 
-        if args.query and args.part_name:
-            print("Warning: Both query image and part name specified, using query image")
+        if args.query and (args.part_name or args.full_assembly):
+            print("Warning: Multiple query types specified, using query image")
             args.part_name = None
+            args.full_assembly = None
 
         # Process part name search if specified
         if args.part_name:
@@ -176,6 +227,24 @@ def main():
                 if "query_match" in results and "path" in results["query_match"]:
                     args.query = results["query_match"]["path"]
                     print(f"Using matched part image for visualization: {args.query}")
+        elif args.full_assembly:
+            # Process full assembly search
+            print(f"Searching for similar assemblies to assembly ID: {args.full_assembly}")
+
+            # If parts are selected, pass them to the retrieve_by_assembly function
+            if args.select_parts:
+                print(f"User selected {len(args.select_parts)} parts for similarity search: {args.select_parts}")
+                results = retrieval_system.retrieve_by_assembly(
+                    args.full_assembly,
+                    k=args.k,
+                    selected_parts=args.select_parts
+                )
+            else:
+                # No parts selected, use all parts
+                results = retrieval_system.retrieve_by_assembly(
+                    args.full_assembly,
+                    k=args.k
+                )
         else:
             # Process standard image query
             print(f"Retrieving similar parts to {args.query}")

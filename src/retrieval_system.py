@@ -1161,6 +1161,393 @@ class RetrievalSystem:
 
         return results
 
+    def retrieve_by_assembly(self, assembly_id, k=10, selected_parts=None):
+        """
+        Retrieve similar assemblies based on the parts in the query assembly
+
+        Args:
+            assembly_id (str): ID of the assembly to query
+            k (int): Number of results to return
+            selected_parts (list): Optional list of part filenames to include in the search
+                                  (if None, all parts are included)
+
+        Returns:
+            results (dict): Search results with assembly similarity scores
+        """
+        print(f"Retrieving similar assemblies to assembly ID: {assembly_id}")
+
+        # Create output directory for full assembly queries if it doesn't exist
+        assembly_results_dir = os.path.join(self.config["data"]["output_dir"], "results", "full_assembly_queries")
+        os.makedirs(assembly_results_dir, exist_ok=True)
+
+        # Find all parts that belong to the assembly
+        image_dir = os.path.join(self.config["data"]["output_dir"], "images")
+        assembly_parts = []
+
+        # Pattern for parts belonging to this assembly: "{assembly_id}_*.png"
+        for filename in os.listdir(image_dir):
+            if filename.startswith(f"{assembly_id}_") and filename.lower().endswith(('.png', '.jpg', '.jpeg')):
+                assembly_parts.append(os.path.join(image_dir, filename))
+
+        if not assembly_parts:
+            print(f"No parts found for assembly ID {assembly_id}")
+            return {"paths": [], "distances": [], "similarities": []}
+
+        # Filter parts based on user selection if provided
+        if selected_parts:
+            original_count = len(assembly_parts)
+            # Save list of original part filenames before filtering
+            original_parts = [os.path.basename(p) for p in assembly_parts]
+
+            # Filter to keep only the parts that were selected by the user
+            assembly_parts = [part_path for part_path in assembly_parts
+                             if os.path.basename(part_path) in selected_parts]
+
+            if not assembly_parts:
+                print(f"Error: None of the selected parts match any parts found for assembly ID {assembly_id}")
+                print(f"Available parts: {original_parts}")
+                return {"paths": [], "distances": [], "similarities": []}
+
+            print(f"Using {len(assembly_parts)} selected parts out of {original_count} total parts for assembly ID {assembly_id}")
+        else:
+            print(f"Found {len(assembly_parts)} parts for assembly ID {assembly_id}")
+
+        # Initialize scores dictionary (without manually adding the query assembly)
+        assembly_scores = {}
+
+        # For each part in the query assembly, find similar parts
+        for part_path in assembly_parts:
+            part_filename = os.path.basename(part_path)
+            print(f"Processing part: {part_filename}")
+
+            # Retrieve similar parts for this part
+            part_results = self.retrieve_similar(
+                part_path,
+                k=k*3,  # Get more results to ensure good coverage of different assemblies
+                rotation_invariant=True,
+                num_rotations=8
+            )
+
+            # Group results by assembly ID to find best match for each assembly
+            assembly_matches = {}
+
+            # Process results for this part
+            if part_results and "paths" in part_results and len(part_results["paths"]) > 0:
+                for i, (result_path, info, similarity) in enumerate(zip(
+                        part_results["paths"],
+                        part_results.get("part_info", [None] * len(part_results["paths"])),
+                        part_results.get("similarities", [None] * len(part_results["paths"]))
+                    )):
+                    # Get the assembly ID from the result part
+                    result_assembly_id = None
+                    if info and "parent_step" in info:
+                        result_assembly_id = info["parent_step"]
+                    else:
+                        # Extract assembly ID from the filename
+                        result_filename = os.path.basename(result_path)
+                        parts = result_filename.split('_', 1)
+                        if len(parts) > 0:
+                            result_assembly_id = parts[0]
+
+                    if result_assembly_id:
+                        # For each assembly, store only the best match for this query part
+                        result_part_name = os.path.basename(result_path)
+                        if result_assembly_id not in assembly_matches:
+                            assembly_matches[result_assembly_id] = {
+                                "similarity": similarity,
+                                "result_part": result_part_name,
+                                "result_path": result_path
+                            }
+                        elif similarity > assembly_matches[result_assembly_id]["similarity"]:
+                            # Keep only the best match for this assembly
+                            assembly_matches[result_assembly_id] = {
+                                "similarity": similarity,
+                                "result_part": result_part_name,
+                                "result_path": result_path
+                            }
+
+            # Now add the best match for each assembly to our overall scores
+            for result_assembly_id, match_info in assembly_matches.items():
+                if result_assembly_id not in assembly_scores:
+                    assembly_scores[result_assembly_id] = {
+                        "score": 0,
+                        "part_matches": [],
+                        "matched_parts": set(),  # Keep track of matched parts to avoid duplicates
+                        "count": 0,
+                        "total_similarity": 0,
+                        "is_query": (result_assembly_id == assembly_id)  # Mark if this is the query assembly
+                    }
+
+                # Only count this match if the target part hasn't been matched yet
+                result_part = match_info["result_part"]
+                if result_part not in assembly_scores[result_assembly_id]["matched_parts"]:
+                    assembly_scores[result_assembly_id]["matched_parts"].add(result_part)
+                    assembly_scores[result_assembly_id]["total_similarity"] += match_info["similarity"]
+                    assembly_scores[result_assembly_id]["count"] += 1
+
+                    # Remember this match with its score
+                    assembly_scores[result_assembly_id]["part_matches"].append({
+                        "query_part": part_filename,
+                        "result_part": result_part,
+                        "similarity": match_info["similarity"]
+                    })
+
+        # Calculate final scores for each assembly
+        for result_assembly_id, data in assembly_scores.items():
+            # Calculate scores for all assemblies (including query if found naturally)
+            if data["count"] > 0:
+                # Calculate raw similarity score (average similarity of matched parts)
+                raw_score = data["total_similarity"] / data["count"]
+
+                # Calculate coverage ratio (how many parts of the query assembly were matched)
+                coverage_ratio = data["count"] / len(assembly_parts)
+
+                # NEW SCORING FORMULA:
+                # Multiply raw similarity by coverage ratio squared to heavily penalize low coverage
+                # This ensures that assemblies with few matching parts can't get high overall scores
+                # An assembly with 5% coverage can at most get 5% of its raw score
+                final_score = raw_score * (coverage_ratio * coverage_ratio)
+
+                # Store both raw and coverage-adjusted scores
+                data["raw_score"] = raw_score
+                data["coverage_ratio"] = coverage_ratio
+                data["score"] = final_score
+
+        # Sort assemblies by score
+        sorted_assemblies = sorted(
+            assembly_scores.items(),
+            key=lambda x: x[1]["score"],
+            reverse=True
+        )
+
+        # Take top k assemblies
+        top_assemblies = sorted_assemblies[:k]
+
+        # Prepare results
+        results = {
+            "paths": [],
+            "similarities": [],
+            "part_info": [],
+            "assembly_details": {}
+        }
+
+        # Look for full assembly images
+        full_assembly_dir = os.path.join(self.config["data"]["output_dir"], "full_assembly_images")
+
+        # Create the directory if it doesn't exist yet
+        if not os.path.exists(full_assembly_dir):
+            os.makedirs(full_assembly_dir, exist_ok=True)
+            print(f"Created full assembly images directory: {full_assembly_dir}")
+
+        # Format results
+        for result_assembly_id, data in top_assemblies:
+            # Try to find the full assembly image first
+            full_assembly_path = os.path.join(full_assembly_dir, f"{result_assembly_id}_full_assembly.png")
+
+            if os.path.exists(full_assembly_path):
+                # Use the full assembly image for visualization
+                results["paths"].append(full_assembly_path)
+            else:
+                # Fall back to the highest similarity part if full assembly image not found
+                if data["part_matches"]:
+                    # Find the highest similarity match to use for visualization
+                    best_match = max(data["part_matches"], key=lambda x: x["similarity"])
+                    match_filepath = os.path.join(image_dir, best_match["result_part"])
+                    results["paths"].append(match_filepath)
+                    print(f"Warning: Full assembly image not found for assembly {result_assembly_id}, using part image instead")
+
+            # Add similarity score
+            results["similarities"].append(data["score"])
+
+            # Add assembly info with a special note for the query assembly
+            is_query = data.get("is_query", False)
+            part_name = "QUERY ASSEMBLY" if is_query else f"Assembly with {data['count']} matching parts"
+
+            results["part_info"].append({
+                "parent_step": result_assembly_id,
+                "part_name": part_name,
+                "is_query": is_query
+            })
+
+            # Add detailed information about this assembly match
+            results["assembly_details"][result_assembly_id] = {
+                "score": data["score"],
+                "raw_score": data.get("raw_score", data["score"]),  # Include raw score if available
+                "matching_parts_count": data["count"],
+                "coverage_ratio": data["count"] / len(assembly_parts),
+                "part_matches": data["part_matches"],
+                "is_query": is_query
+            }
+
+        # Create a visualization of the full assembly query results
+        if results["paths"]:
+            # Look for the full assembly image for the query assembly
+            query_full_assembly = os.path.join(full_assembly_dir, f"{assembly_id}_full_assembly.png")
+
+            if os.path.exists(query_full_assembly):
+                # Use the full assembly image as the query image
+                query_image_path = query_full_assembly
+            else:
+                # Fall back to the first part if full assembly image not found
+                query_image_path = assembly_parts[0]
+                print(f"Warning: Full assembly image not found for query assembly {assembly_id}, using part image instead")
+
+            # Create output path for visualization
+            output_path = os.path.join(assembly_results_dir, f"assembly_{assembly_id}_results.png")
+
+            # Add visualization path to results
+            results["visualization_path"] = output_path
+
+            # Call visualize_results with a custom title
+            self._visualize_assembly_results(
+                query_image_path,
+                results,
+                assembly_id,
+                len(assembly_parts),
+                output_path
+            )
+
+        return results
+
+    def _visualize_assembly_results(self, query_image_path, results, assembly_id, parts_count, output_path):
+        """
+        Visualize assembly retrieval results with custom titles
+
+        Args:
+            query_image_path (str): Path to a representative query image
+            results (dict): Search results
+            assembly_id (str): Query assembly ID
+            parts_count (int): Number of parts in the query assembly
+            output_path (str): Path to save the visualization
+        """
+        try:
+            import matplotlib.pyplot as plt
+            from PIL import Image
+            import numpy as np
+
+            # Get the paths to result images and their assembly details
+            result_paths = results["paths"]
+            assembly_details = results.get("assembly_details", {})
+
+            # Get or calculate similarity scores
+            similarities = results.get("similarities", [])
+
+            # Number of results to display
+            n_results = len(result_paths)
+
+            # Create a figure with n+1 subplots (query + results)
+            fig_width = max(20, 2 * (n_results + 1))  # Cap the width to a reasonable size
+            fig = plt.figure(figsize=(fig_width, 6))
+
+            # Add a super title
+            fig.suptitle(f"Assembly Query Results for Assembly {assembly_id} ({parts_count} parts)",
+                         fontsize=16, fontweight='bold')
+
+            # Create grid spec for better layout control
+            gs = fig.add_gridspec(2, n_results + 1)
+
+            # Plot query image in a larger size (spans 2 rows)
+            ax_query = fig.add_subplot(gs[:, 0])
+            query_img = Image.open(query_image_path).convert('RGB')
+            ax_query.imshow(query_img)
+            ax_query.set_title(f"Query Assembly #{assembly_id}\n{parts_count} parts", fontsize=12)
+            ax_query.axis('off')
+
+            # Plot result images with similarity score
+            for i in range(n_results):
+                # Get assembly details
+                result_assembly_id = results["part_info"][i].get("parent_step", "unknown")
+                is_query_assembly = results["part_info"][i].get("is_query", False)
+                detail = assembly_details.get(result_assembly_id, {})
+
+                # Plot the result image in the top row
+                ax_img = fig.add_subplot(gs[0, i+1])
+                if result_paths[i] and os.path.exists(result_paths[i]):
+                    img = Image.open(result_paths[i]).convert('RGB')
+                    ax_img.imshow(img)
+
+                    # Add border to highlight query assembly when it appears in results
+                    if is_query_assembly:
+                        for spine in ax_img.spines.values():
+                            spine.set_edgecolor('gold')
+                            spine.set_linewidth(5)
+                else:
+                    ax_img.text(0.5, 0.5, "Image not found", ha='center', va='center')
+
+                # Calculate a color based on similarity score
+                similarity = similarities[i] if i < len(similarities) else 0
+                if is_query_assembly:
+                    # Use gold color for query assembly
+                    color = 'darkgoldenrod'
+                    title_prefix = "QUERY "
+                elif similarity >= 90:
+                    color = 'darkgreen'
+                    title_prefix = ""
+                elif similarity >= 70:
+                    color = 'green'
+                    title_prefix = ""
+                elif similarity >= 50:
+                    color = 'darkorange'
+                    title_prefix = ""
+                elif similarity >= 20:
+                    color = 'orange'
+                    title_prefix = ""
+                else:
+                    color = 'red'
+                    title_prefix = ""
+
+                # Set the title for the image, with special formatting for the query assembly
+                ax_img.set_title(f"{title_prefix}Assembly #{result_assembly_id}",
+                                fontsize=10,
+                                color=color,
+                                fontweight='bold' if is_query_assembly else 'normal')
+                ax_img.axis('off')
+
+                # Plot the details in the bottom row
+                ax_detail = fig.add_subplot(gs[1, i+1])
+                ax_detail.axis('off')
+
+                # Format the details text
+                matching_parts = detail.get("matching_parts_count", 0)
+                coverage = detail.get("coverage_ratio", 0) * 100
+                score = similarity
+
+                if is_query_assembly:
+                    detail_text = "EXACT MATCH\n"
+                    detail_text += f"Score: {score:.1f}%\n"
+                    detail_text += f"Parts: {matching_parts}"
+                else:
+                    detail_text = f"Score: {score:.1f}%\n"
+                    detail_text += f"Matching parts: {matching_parts}\n"
+                    detail_text += f"Coverage: {coverage:.1f}%"
+
+                # Display the details with colored text based on score
+                ax_detail.text(0.5, 0.5, detail_text, ha='center', va='center',
+                              color=color, fontweight='bold', fontsize=9)
+
+                # Add additional highlight for query assembly
+                if is_query_assembly:
+                    # Add background rectangle to make the match more obvious
+                    rect = plt.Rectangle((-0.05, -0.05), 1.1, 1.1, fill=True,
+                                       color='lightyellow', alpha=0.3, transform=ax_detail.transAxes)
+                    ax_detail.add_patch(rect)
+
+            plt.tight_layout()
+            plt.subplots_adjust(top=0.85)  # Make room for the super title
+
+            # Save the visualization
+            plt.savefig(output_path, dpi=150)
+            plt.close()
+
+            print(f"Assembly visualization saved to {output_path}")
+            return output_path
+
+        except Exception as e:
+            print(f"Error visualizing assembly results: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
     def get_system_info(self):
         """
         Get information about the retrieval system
