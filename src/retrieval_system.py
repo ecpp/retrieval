@@ -647,8 +647,13 @@ class RetrievalSystem:
                 # For moderate size matches (5-50%), use the standard formula
                 adjusted_score = original_score * (1 - size_weight) + size_sim * size_weight
 
-            # Display debugging information
-            print(f"{part_name:20} | {original_score:.2f}      | {size_sim:.2f}     | {adjusted_score:.2f}")
+            # Display debugging information - handle Unicode safely
+            try:
+                print(f"{part_name:20} | {original_score:.2f}      | {size_sim:.2f}     | {adjusted_score:.2f}")
+            except UnicodeEncodeError:
+                # Replace problematic characters or use a safe representation
+                safe_part_name = part_name.encode('ascii', 'replace').decode('ascii')
+                print(f"{safe_part_name:20} | {original_score:.2f}      | {size_sim:.2f}     | {adjusted_score:.2f}")
 
             reranked_scores.append(adjusted_score)
 

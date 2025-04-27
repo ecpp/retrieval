@@ -8,15 +8,15 @@ from src.retrieval_system import RetrievalSystem
 def parse_args():
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(
-        description='CAD Part Retrieval System - Search by image or part name',
+        description='Part Retrieval System - Search by image or part name',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         epilog="""Examples:
         - Search by image: python main.py retrieve --query path/to/image.png --k 5 --visualize
         - Search by part name: python main.py retrieve --part-name "screw" --k 5 --visualize
         - Advanced search: python main.py retrieve --part-name "bolt" --match-threshold 0.6 --rotation-invariant
-        - Assembly search: python main.py retrieve --full-assembly "A123" --k 5
-        - List assembly parts: python main.py list-assembly-parts --assembly-id "A123"
-        - Search with selected parts: python main.py retrieve --full-assembly "A123" --select-parts "A123_part1.png" "A123_part2.png"
+        - Assembly search: python main.py retrieve --full-assembly "123" --k 5
+        - List assembly parts: python main.py list-assembly-parts --assembly-id "123"
+        - Search with selected parts: python main.py retrieve --full-assembly "123" --select-parts "123_part1.png" "123_part2.png"
         """
     )
 
