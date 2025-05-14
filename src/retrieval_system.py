@@ -12,6 +12,7 @@ from .evaluator import RetrievalEvaluator
 from .rotational_utils import rotation_invariant_search
 import math
 import numpy as np
+from matplotlib.gridspec import GridSpec
 
 # Import new components for Phase 2
 try:
@@ -911,9 +912,13 @@ class RetrievalSystem:
                 ax.axis('off')
 
             plt.tight_layout()
+            plt.subplots_adjust(top=0.95, hspace=0.5)  # Make room for the super title
 
-            # Always save to the output path (never show in GUI)
-            plt.savefig(output_path)
+            # Add more space for the figure margins to prevent text cutoff
+            plt.subplots_adjust(left=0.03, right=0.97, bottom=0.05, top=0.90, hspace=0.7, wspace=0.3)
+
+            # Save the visualization
+            plt.savefig(output_path, dpi=150, bbox_inches='tight', pad_inches=0.2)
             plt.close()
             print(f"Visualization saved to {output_path}")
 
@@ -1430,6 +1435,17 @@ class RetrievalSystem:
             from PIL import Image
             import numpy as np
 
+            # Ensure no axes are shown by default
+            plt.rcParams['axes.grid'] = False
+            plt.rcParams['axes.spines.top'] = False
+            plt.rcParams['axes.spines.right'] = False
+            plt.rcParams['axes.spines.bottom'] = False
+            plt.rcParams['axes.spines.left'] = False
+            plt.rcParams['xtick.bottom'] = False
+            plt.rcParams['xtick.labelbottom'] = False
+            plt.rcParams['ytick.left'] = False
+            plt.rcParams['ytick.labelleft'] = False
+
             # Get the paths to result images and their assembly details
             result_paths = results["paths"]
             assembly_details = results.get("assembly_details", {})
@@ -1442,21 +1458,57 @@ class RetrievalSystem:
 
             # Create a figure with n+1 subplots (query + results)
             fig_width = max(20, 2 * (n_results + 1))  # Cap the width to a reasonable size
-            fig = plt.figure(figsize=(fig_width, 6))
+
+            # First, organize matched parts by query part for proper alignment
+            # This maps each query part to its row position
+            query_part_to_row = {}
+            row_count = 0
+
+            # Create a dictionary to track which query parts have matches in each assembly
+            for result_assembly_id, detail in assembly_details.items():
+                if "part_matches" in detail:
+                    for match in detail.get("part_matches", []):
+                        query_part = match.get("query_part", "")
+                        if query_part not in query_part_to_row:
+                            query_part_to_row[query_part] = row_count
+                            row_count += 1
+
+            # Calculate the number of rows needed based on unique query parts
+            max_matched_parts = len(query_part_to_row)
+
+            # Calculate figure height based on number of matched parts
+            # Set reasonable minimum and maximum heights
+            fig_height = 6 + (max_matched_parts * 2)
+            fig_height = min(max(fig_height, 8), 20)  # Min 8, max 20
+
+            # Use constrained_layout instead of tight_layout to avoid warnings
+            fig = plt.figure(figsize=(fig_width, fig_height), constrained_layout=True)
 
             # Add a super title
             fig.suptitle(f"Assembly Query Results for Assembly {assembly_id} ({parts_count} parts)",
                          fontsize=16, fontweight='bold')
 
             # Create grid spec for better layout control
-            gs = fig.add_gridspec(2, n_results + 1)
+            # First section (2 rows): main assembly images
+            # Second section (max_matched_parts * 2 rows): part matches
+            total_rows = 3 + (max_matched_parts * 2)  # Added an extra row for better separation
+            # Add more space between rows to prevent text overlap
+            height_ratios = [1.2, 0.8, 0.5]  # Added a spacer row of 0.5 between sections
+            height_ratios.extend([1.0, 0.2] * max_matched_parts)
+            gs = GridSpec(total_rows, n_results + 1, figure=fig, hspace=0.5, wspace=0.3, height_ratios=height_ratios)
 
             # Plot query image in a larger size (spans 2 rows)
-            ax_query = fig.add_subplot(gs[:, 0])
+            ax_query = fig.add_subplot(gs[0:2, 0])
             query_img = Image.open(query_image_path).convert('RGB')
             ax_query.imshow(query_img)
             ax_query.set_title(f"Query Assembly #{assembly_id}\n{parts_count} parts", fontsize=12)
             ax_query.axis('off')
+
+            # Add section header for the top part (Assembly Results)
+            header_ax = fig.add_subplot(gs[0, 1:])
+            header_ax.axis('off')
+            # Remove the "ASSEMBLY MATCHES" title as requested
+            header_ax.set_zorder(100)  # Make sure it's on top
 
             # Plot result images with similarity score
             for i in range(n_results):
@@ -1508,7 +1560,7 @@ class RetrievalSystem:
                                 fontweight='bold' if is_query_assembly else 'normal')
                 ax_img.axis('off')
 
-                # Plot the details in the bottom row
+                # Plot the details in the row below the assembly image
                 ax_detail = fig.add_subplot(gs[1, i+1])
                 ax_detail.axis('off')
 
@@ -1537,11 +1589,165 @@ class RetrievalSystem:
                                        color='lightyellow', alpha=0.3, transform=ax_detail.transAxes)
                     ax_detail.add_patch(rect)
 
-            plt.tight_layout()
-            plt.subplots_adjust(top=0.85)  # Make room for the super title
+            # Add the part comparison section header in the spacer row
+            separator_ax = fig.add_subplot(gs[2, :])
+            separator_ax.axis('off')
+            separator_ax.axhline(y=0.5, color='gray', linestyle='-', alpha=0.3, linewidth=1)
+
+            # Add the section header
+            label_ax = fig.add_subplot(gs[2, 0:2])
+            label_ax.axis('off')
+            label_ax.text(0.1, 0.5, "MATCHED PARTS COMPARISON",
+                        ha='left', va='center', fontsize=11, fontweight='bold',
+                        bbox=dict(boxstyle="round,pad=0.3", facecolor='lightblue', alpha=0.2))
+
+            # First, draw all the query parts on the left side
+            image_dir = os.path.join(self.config["data"]["output_dir"], "images")
+
+            # Step 1: Plot all query parts in the first column
+            for query_part, row_position in query_part_to_row.items():
+                row_idx = 3 + (row_position * 2)  # Start after the assembly rows + header row
+
+                # Query part (left column)
+                query_part_path = os.path.join(image_dir, query_part)
+                query_part_ax = fig.add_subplot(gs[row_idx:row_idx+2, 0])
+                query_part_ax.axis('off')
+
+                # Extract part name from filename
+                query_part_name = query_part
+                try:
+                    # Parse first part as assembly ID, rest as part name
+                    parts = query_part.split('_', 1)
+                    if len(parts) > 1:
+                        query_part_name = parts[1]
+                except:
+                    pass
+
+                if os.path.exists(query_part_path):
+                    query_part_img = Image.open(query_part_path).convert('RGB')
+                    query_part_ax.imshow(query_part_img)
+                    # Improve part name readability by wrapping text and using smaller font
+                    query_part_name = query_part_name[:20] + ('...' if len(query_part_name) > 20 else '')
+                    query_part_ax.set_title(f"Selected:\n{query_part_name}",
+                                          fontsize=7, color='blue', wrap=True)
+                else:
+                    query_part_ax.text(0.5, 0.5, f"Selected:\n{query_part_name[:15]}...\n(Image not found)",
+                                     ha='center', va='center', fontsize=7)
+
+            # Step 2: Now fill in the matched parts for each result assembly
+            for i in range(n_results):
+                result_assembly_id = results["part_info"][i].get("parent_step", "unknown")
+                is_query_assembly = results["part_info"][i].get("is_query", False)
+                detail = assembly_details.get(result_assembly_id, {})
+
+                if detail and "part_matches" in detail:
+                    # Create a dictionary to map query parts to their matches for this assembly
+                    this_assembly_matches = {}
+                    for match in detail.get("part_matches", []):
+                        query_part = match.get("query_part", "")
+                        if query_part in query_part_to_row:
+                            this_assembly_matches[query_part] = match
+
+                    # Now plot the matched parts in the correct row positions
+                    for query_part, row_position in query_part_to_row.items():
+                        row_idx = 3 + (row_position * 2)
+
+                        # If this query part has a match in this assembly, show it
+                        if query_part in this_assembly_matches:
+                            match = this_assembly_matches[query_part]
+
+                            # Result part info
+                            result_part_filename = match.get("result_part", "")
+                            result_part_path = os.path.join(image_dir, result_part_filename)
+
+                            # Create the subplot for this match
+                            result_part_ax = fig.add_subplot(gs[row_idx:row_idx+2, i+1])
+                            result_part_ax.axis('off')
+
+                            # Extract part name from filename
+                            result_part_name = result_part_filename
+                            try:
+                                # Parse first part as assembly ID, rest as part name
+                                parts = result_part_filename.split('_', 1)
+                                if len(parts) > 1:
+                                    result_part_name = parts[1]
+                            except:
+                                pass
+
+                            # Get similarity
+                            match_sim = match.get("similarity", 0)
+
+                            # For display purposes, ensure it's within a reasonable range (0-100)
+                            display_sim = match_sim
+                            if display_sim > 1.0 and display_sim <= 100:
+                                # Value is likely already a percentage (1-100)
+                                pass
+                            elif display_sim > 100:
+                                # Value is too large, normalize it
+                                display_sim = min(100, display_sim / 100)
+                            elif display_sim < 1.0:
+                                # Value is a decimal, convert to percentage
+                                display_sim = display_sim * 100
+
+                            # Determine color based on match similarity
+                            match_color = 'red'
+                            # Use normalized display value for color determination
+                            if display_sim >= 90:
+                                match_color = 'darkgreen'
+                            elif display_sim >= 70:
+                                match_color = 'green'
+                            elif display_sim >= 50:
+                                match_color = 'darkorange'
+
+                            if os.path.exists(result_part_path):
+                                result_part_img = Image.open(result_part_path).convert('RGB')
+                                result_part_ax.imshow(result_part_img)
+                                # Improve part name readability
+                                result_part_name = result_part_name[:20] + ('...' if len(result_part_name) > 20 else '')
+                                result_part_ax.set_title(f"Match:\n{result_part_name}\nSim: {display_sim:.1f}%",
+                                                       fontsize=7, color=match_color, wrap=True)
+                            else:
+                                result_part_ax.text(0.5, 0.5, f"Match:\n{result_part_name[:15]}...\nSim: {display_sim:.1f}%\n(Image not found)",
+                                                  ha='center', va='center', fontsize=7, color=match_color)
+
+                            # Draw the connecting line
+                            ax_connector = fig.add_subplot(gs[row_idx:row_idx+2, 0:i+2])
+                            ax_connector.axis('off')
+                            ax_connector.clear()
+                            ax_connector.set_zorder(-10)
+
+                            # Draw the line
+                            line_y = 0.5
+                            if is_query_assembly:
+                                # Gold color for query assembly matches
+                                line = ax_connector.axhline(y=line_y, xmin=0.05, xmax=0.95,
+                                                         color='darkgoldenrod', alpha=0.7,
+                                                         linewidth=2.5, linestyle='-.')
+                            else:
+                                # Brighter lines
+                                line = ax_connector.axhline(y=line_y, xmin=0.05, xmax=0.95,
+                                                         color=match_color, alpha=0.6,
+                                                         linewidth=2, linestyle='-.')
+
+            # Ensure all axes are completely hidden
+            for ax in fig.get_axes():
+                ax.set_xticks([])
+                ax.set_yticks([])
+                ax.set_xticklabels([])
+                ax.set_yticklabels([])
+                ax.spines['top'].set_visible(False)
+                ax.spines['right'].set_visible(False)
+                ax.spines['bottom'].set_visible(False)
+                ax.spines['left'].set_visible(False)
+                ax.axis('off')
+
+            # Don't use tight_layout as it causes warnings
+            # Instead use constrained_layout (set when creating figure)
+            # And additional manual adjustments if needed
+            plt.subplots_adjust(left=0.03, right=0.97, bottom=0.05, top=0.90, hspace=0.7, wspace=0.3)
 
             # Save the visualization
-            plt.savefig(output_path, dpi=150)
+            plt.savefig(output_path, dpi=150, bbox_inches='tight', pad_inches=0.2)
             plt.close()
 
             print(f"Assembly visualization saved to {output_path}")
