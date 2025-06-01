@@ -131,3 +131,22 @@ The current implementation focuses on visual similarity using image embeddings:
 4. Visualization of retrieval results
 
 Future phases will integrate BOM metadata and implement multimodal retrieval.
+
+## Evaluation
+
+To evaluate the retrieval system, we provide automated scripts that run multiple random queries and save the results for manual inspection:
+
+- `evaluate_part_retrieval.py`: Evaluates part image retrieval
+- `evaluate_name_retrieval.py`: Evaluates part name retrieval
+
+Examples:
+
+```
+python evaluate_part_retrieval.py --num-queries 20 --k 10 --rotation-invariant
+```
+
+```
+python evaluate_name_retrieval.py --custom-queries "bolt" "gear" "housing" --k 5
+```
+
+See `README_EVALUATION.md` for detailed information about the evaluation scripts.
