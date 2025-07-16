@@ -55,3 +55,5 @@ models/faiss_index.bin
 data/output/results/query_results_sample_query.png.png
 models/index_metadata.pkl
 data/
+models_old/
+data_old/
