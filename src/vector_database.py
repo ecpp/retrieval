@@ -220,6 +220,38 @@ class VectorDatabase:
             with open(self.metadata_file, 'rb') as f:
                 self.metadata = pickle.load(f)
             print(f"Metadata loaded from {self.metadata_file}")
+            
+            # Normalize paths for cross-platform compatibility
+            self._normalize_paths()
+
+    def _normalize_paths(self):
+        """
+        Normalize file paths for cross-platform compatibility.
+        Converts Windows-style paths to Unix-style paths when running on Unix systems.
+        """
+        if not self.metadata or "id_to_path" not in self.metadata:
+            return
+        
+        normalized_count = 0
+        
+        # Normalize id_to_path mapping
+        for idx, path in self.metadata["id_to_path"].items():
+            if path and ('\\' in path):
+                # Convert Windows backslashes to forward slashes
+                normalized_path = path.replace('\\', '/')
+                self.metadata["id_to_path"][idx] = normalized_path
+                normalized_count += 1
+        
+        # Rebuild path_to_id mapping with normalized paths
+        if "path_to_id" in self.metadata:
+            # Clear and rebuild the reverse mapping
+            self.metadata["path_to_id"] = {}
+            for idx, normalized_path in self.metadata["id_to_path"].items():
+                if normalized_path:
+                    self.metadata["path_to_id"][normalized_path] = idx
+        
+        if normalized_count > 0:
+            print(f"Normalized {normalized_count} paths for cross-platform compatibility")
 
     def get_stats(self):
         """

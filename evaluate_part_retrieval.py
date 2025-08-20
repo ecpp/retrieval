@@ -27,6 +27,8 @@ def parse_args():
                         help='Random seed for reproducibility')
     parser.add_argument('--output-dir', type=str, default='data/evaluation/part_retrieval',
                         help='Directory to store evaluation results')
+    parser.add_argument('--dataset-dir', type=str, default=None,
+                        help='Dataset directory containing images (overrides config)')
 
     return parser.parse_args()
 
@@ -49,17 +51,33 @@ def main():
     # Initialize retrieval system
     retrieval_system = RetrievalSystem()
 
-    # Check for the image directory
-    image_dir = os.path.join(retrieval_system.config["data"]["output_dir"], "images")
-    if not os.path.exists(image_dir):
-        print(f"Error: Image directory {image_dir} does not exist!")
-        return 1
-
     # Get list of available images
-    available_images = [
-        os.path.join(image_dir, f) for f in os.listdir(image_dir)
-        if f.lower().endswith(('.png', '.jpg', '.jpeg'))
-    ]
+    available_images = []
+    
+    if args.dataset_dir:
+        # For dataset directory, search for images in subdirectories
+        print(f"Searching for images in dataset directory: {args.dataset_dir}")
+        for subdir in os.listdir(args.dataset_dir):
+            subdir_path = os.path.join(args.dataset_dir, subdir)
+            if os.path.isdir(subdir_path):
+                images_path = os.path.join(subdir_path, "images")
+                if os.path.exists(images_path):
+                    images = [
+                        os.path.join(images_path, f) for f in os.listdir(images_path)
+                        if f.lower().endswith(('.png', '.jpg', '.jpeg'))
+                    ]
+                    available_images.extend(images)
+    else:
+        # Use default from config
+        image_dir = os.path.join(retrieval_system.config["data"]["output_dir"], "images")
+        if not os.path.exists(image_dir):
+            print(f"Error: Image directory {image_dir} does not exist!")
+            return 1
+        
+        available_images = [
+            os.path.join(image_dir, f) for f in os.listdir(image_dir)
+            if f.lower().endswith(('.png', '.jpg', '.jpeg'))
+        ]
 
     if not available_images:
         print("Error: No images found in the dataset!")

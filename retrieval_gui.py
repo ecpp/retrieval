@@ -265,8 +265,10 @@ class ResultTab(QWidget):
         layout.addWidget(path_label)
 
     def load_image(self):
-        if os.path.exists(self.image_path):
-            pixmap = QPixmap(self.image_path)
+        # Normalize path for WSL compatibility
+        normalized_path = self.image_path.replace('\\', '/')
+        if os.path.exists(normalized_path):
+            pixmap = QPixmap(normalized_path)
             if not pixmap.isNull():
                 pixmap_item = QGraphicsPixmapItem(pixmap)
                 self.scene.addItem(pixmap_item)
@@ -311,7 +313,9 @@ class ResultThumbnail(QFrame):
         # Add image
         image_label = QLabel()
         image_label.setAlignment(Qt.AlignCenter)
-        pixmap = QPixmap(self.image_path)
+        # Normalize path for WSL compatibility (convert Windows backslashes to forward slashes)
+        normalized_path = self.image_path.replace('\\', '/')
+        pixmap = QPixmap(normalized_path)
 
         if not pixmap.isNull():
             pixmap = pixmap.scaled(150, 100, Qt.KeepAspectRatio, Qt.SmoothTransformation)

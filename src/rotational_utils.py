@@ -2,6 +2,7 @@ import torch
 import numpy as np
 import os
 import json
+import time
 from PIL import Image
 import torchvision.transforms.functional as TF
 import matplotlib.pyplot as plt
@@ -253,8 +254,10 @@ def rotation_invariant_search(image_encoder, vector_db, query_image_path, k=10, 
         bom_dir (str): Directory containing BOM files
 
     Returns:
-        results (dict): Search results
+        results (dict): Search results with accurate timing
     """
+    # Start high-precision timing for rotation-invariant search
+    start_time = time.perf_counter()
     # Extract part info from path for metadata lookup
     basename = os.path.basename(query_image_path)
     print(f"\n--- Rotation-Invariant Search Debug ---")
@@ -432,8 +435,15 @@ def rotation_invariant_search(image_encoder, vector_db, query_image_path, k=10, 
         else:
             print(f"No query metadata available for reranking")
 
+        # Calculate total rotation-invariant search time
+        end_time = time.perf_counter()
+        rotation_search_time = end_time - start_time
+        
+        # Add timing to results
+        combined_results["retrieval_time"] = rotation_search_time
+        
         print(f"Found {len(combined_results['paths'])} results across all rotations")
-        print(f"--- End of Rotation-Invariant Search Debug ---\n")
+        print(f"--- End of Rotation-Invariant Search Debug (Time: {rotation_search_time:.4f}s) ---\n")
 
         return combined_results
 
@@ -441,7 +451,12 @@ def rotation_invariant_search(image_encoder, vector_db, query_image_path, k=10, 
         print(f"Error in rotation-invariant search: {e}")
         import traceback
         traceback.print_exc()
-        return {"paths": [], "distances": [], "similarities": []}
+        
+        # Calculate timing even for error case
+        end_time = time.perf_counter()
+        rotation_search_time = end_time - start_time
+        
+        return {"paths": [], "distances": [], "similarities": [], "retrieval_time": rotation_search_time}
 
 # New function to generate more consistent rotation angles
 def generate_multi_view_angles(num_rotations=16):

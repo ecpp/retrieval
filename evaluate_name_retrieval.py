@@ -46,6 +46,8 @@ def parse_args():
                         help='Directory to store evaluation results')
     parser.add_argument('--custom-queries', nargs='+', type=str, default=[],
                         help='Custom part name queries to use (instead of random selection)')
+    parser.add_argument('--dataset-dir', type=str, default=None,
+                        help='Dataset directory containing images (overrides config)')
 
     return parser.parse_args()
 

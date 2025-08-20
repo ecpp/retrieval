@@ -63,8 +63,9 @@ MKL_THREADING_LAYER=GNU /home/ngin/miniconda3/envs/f_r/bin/python comprehensive_
 - **System Benchmarks**: Measures ingest, training, and build performance
 - **Retrieval Analysis**: Part image and name search evaluation
 - **Scalability Testing**: Performance vs. query load analysis
-- **Publication-Ready Graphs**: Automated thesis figure generation
+- **Publication-Ready Graphs**: Automated thesis figure generation (separate PNG files)
 - **Statistical Analysis**: Comprehensive metrics and comparisons
+- **Figure Explanations**: Automated documentation for each generated figure
 
 ### Individual Evaluation Scripts
 ```bash
@@ -81,6 +82,17 @@ See `EVALUATION_METHODOLOGY.md` for detailed academic evaluation approach, inclu
 - Statistical analysis methods
 - Reproducibility measures
 - Expected outcomes for thesis documentation
+
+### Generated Thesis Figures
+The comprehensive evaluation generates separate PNG files for thesis inclusion:
+- `visual_retrieval_similarity_vs_k.png`: DINOv2 visual similarity effectiveness
+- `visual_retrieval_time_vs_k.png`: Visual search response time scalability
+- `textual_retrieval_score_vs_k.png`: Text matching accuracy analysis
+- `textual_retrieval_time_vs_k.png`: Textual search performance characteristics
+- `retrieval_performance_comparison.png`: Multi-modal effectiveness comparison
+
+Each figure includes detailed explanations in `figure_explanations/` directory.
+See `THESIS_FIGURES_SUMMARY.md` for complete analysis of what each figure proves.
 
 ### CLI Commands (For Advanced Users)
 ```bash

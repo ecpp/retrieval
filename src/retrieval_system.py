@@ -1,6 +1,7 @@
 import os
 import yaml
 import json
+import time
 import torch
 from PIL import Image
 import matplotlib.pyplot as plt
@@ -376,12 +377,15 @@ class RetrievalSystem:
             num_rotations (int): Number of rotations to try if rotation_invariant is True
 
         Returns:
-            results (dict): Search results
+            results (dict): Search results with accurate timing
         """
+        # Start high-precision timing for the entire retrieval process
+        start_time = time.perf_counter()
+        
         # Validate input
         if not os.path.exists(query_image_path):
             print(f"Error: Query image path does not exist: {query_image_path}")
-            return {"paths": [], "distances": [], "similarities": []}
+            return {"paths": [], "distances": [], "similarities": [], "retrieval_time": 0.0}
 
         try:
             query_part_info = self.extract_part_info(query_image_path)
@@ -524,13 +528,25 @@ class RetrievalSystem:
             else:
                 print("Skipping size-based reranking due to missing metadata")
 
-            print(f"--- Retrieval Process Complete ---\n")
+            # Calculate total retrieval time
+            end_time = time.perf_counter()
+            retrieval_time = end_time - start_time
+            
+            # Add timing to results
+            results["retrieval_time"] = retrieval_time
+            
+            print(f"--- Retrieval Process Complete (Time: {retrieval_time:.4f}s) ---\n")
             return results
         except Exception as e:
             print(f"Error retrieving similar parts: {e}")
             import traceback
             traceback.print_exc()
-            return {"paths": [], "distances": [], "similarities": []}
+            
+            # Calculate timing even for error case
+            end_time = time.perf_counter()
+            retrieval_time = end_time - start_time
+            
+            return {"paths": [], "distances": [], "similarities": [], "retrieval_time": retrieval_time}
 
     def _rerank_by_size(self, results, query_metadata, size_weight=0.3):
         """
@@ -1144,31 +1160,48 @@ class RetrievalSystem:
             threshold (float): Minimum similarity score (0-1) for matching part names
 
         Returns:
-            results (dict): Search results
+            results (dict): Search results with accurate timing
         """
-        # First find the part by name
+        # Start high-precision timing for the entire name-based retrieval process
+        start_time = time.perf_counter()
+        
+        # Time the name search phase
+        name_search_start = time.perf_counter()
         part_match = self.find_part_by_name(part_name, threshold=threshold)
+        name_search_time = time.perf_counter() - name_search_start
 
         if not part_match or "path" not in part_match or not part_match["path"]:
             print(f"Could not find a part matching '{part_name}'")
-            return {"paths": [], "distances": [], "similarities": []}
+            total_time = time.perf_counter() - start_time
+            return {"paths": [], "distances": [], "similarities": [], "retrieval_time": total_time}
 
         # Use the found part's image as a query
         query_image_path = part_match["path"]
         print(f"Found part image at {query_image_path}, using it as query for visual search")
 
-        # Perform visual search with the found image
+        # Perform visual search with the found image (this has its own timing)
+        visual_search_start = time.perf_counter()
         results = self.retrieve_similar(
             query_image_path,
             k=k,
             rotation_invariant=rotation_invariant,
             num_rotations=num_rotations
         )
-
+        
+        # Calculate total time including both name search and visual search
+        total_time = time.perf_counter() - start_time
+        visual_search_time = results.get("retrieval_time", 0.0)
+        
+        # Add detailed timing breakdown to results
+        results["retrieval_time"] = total_time
+        results["name_search_time"] = name_search_time
+        results["visual_search_time"] = visual_search_time
+        
         # Add the original query info to the results
         results["query_part_name"] = part_name
         results["query_match"] = part_match
 
+        print(f"Name-based retrieval complete (Total: {total_time:.4f}s, Name search: {name_search_time:.4f}s, Visual search: {visual_search_time:.4f}s)")
         return results
 
     def retrieve_by_assembly(self, assembly_id, k=10, selected_parts=None):
